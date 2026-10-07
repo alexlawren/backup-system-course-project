@@ -104,9 +104,56 @@
 - `ResolveVersion`: Запрос метаданных конкретной версии по номеру.
 - `ResolveVersionResult`: Ответ с метаданными и ключом хранилища `StorageKey`.
 
+### Физическое файловое хранилище (StorageService):
+- `StoreFile`: Запрос дескриптора на загрузку физического файла (`OperationId`, `ClientId`, `BackupSetId`, `FileId`, `VersionNumber`, `ExpectedSize`, `ExpectedSha256`).
+- `StoreFileReady`: Подтверждение готовности сервера принять бинарный поток (`Accepted: bool`, `ErrorCode`, `ErrorMessage`).
+- `UploadFile`: Бинарный поток байт файла (`BodyLength = ExpectedSize`, `CorrelationId = storeFileMessageId`, `ContentType = application/octet-stream`).
+- `StoreFileResult`: Финальный результат сохранения (`Success`, `StorageKey`, `ActualSize`, `ActualSha256`, `ErrorCode`, `ErrorMessage`).
+- `GetStoredFile`: Запрос на чтение сохраненного файла (`StorageKey`).
+- `GetStoredFileResult`: Дескриптор файла перед передачей потока (`Success`, `StorageKey`, `Size`, `Sha256`, `ErrorCode`, `ErrorMessage`).
+- `StoredFile`: Бинарный поток байт запрошенного файла (`BodyLength = Size`, `CorrelationId = getStoredFileMessageId`).
+
 ---
 
-## 5. Примеры полезной нагрузки сообщений
+## 5. Протокольный цикл сохранения и получения файлов
+
+### Протокол сохранения файла (Store Flow):
+```
+Gateway (Client)                                          StorageService
+      |                                                         |
+      |-- 1. StoreFile [JSON] --------------------------------->|
+      |      (OpId, ClientId, SetId, FileId, Ver, Size, Hash)   |-- Валидация параметров
+      |                                                         |-- Подготовка .tmp/{OpId}.part
+      |<-- 2. StoreFileReady [JSON] ----------------------------|
+      |      (Accepted=true/false, ErrorCode, ErrorMessage)     |
+      |                                                         |
+      |-- 3. UploadFile [Binary Stream] ----------------------->|
+      |      (BodyLength=ExpectedSize, Raw Bytes)               |-- Инкрементальный SHA-256
+      |                                                         |-- Потоковая запись в .tmp
+      |                                                         |-- Сверка размера и хэша
+      |                                                         |-- Проверка идемпотентности
+      |                                                         |-- Атомарный File.Move()
+      |<-- 4. StoreFileResult [JSON] ---------------------------|
+      |      (Success, StorageKey, ActualSize, ActualSha256)    |
+```
+
+### Протокол получения файла (Get Flow):
+```
+Gateway (Client)                                          StorageService
+      |                                                         |
+      |-- 1. GetStoredFile [JSON] ----------------------------->|
+      |      (StorageKey)                                       |-- Валидация StorageKey
+      |                                                         |-- Проверка существования
+      |<-- 2. GetStoredFileResult [JSON] -----------------------|
+      |      (Success, StorageKey, Size, Sha256)                |
+      |                                                         |
+      |<-- 3. StoredFile [Binary Stream] -----------------------| (если Success=true)
+      |      (BodyLength=Size, Raw Bytes)                       |
+```
+
+---
+
+## 6. Примеры полезной нагрузки сообщений
 
 ### 1. `RegisterClient`
 ```json
@@ -148,22 +195,56 @@
 }
 ```
 
-### 3. `CommitVersion`
+### 3. `StoreFile` и `StoreFileReady`
 ```json
-// Request: MessageType.CommitVersion
+// Request: MessageType.StoreFile
 {
   "operationId": "f7d8c9e0-1234-5678-9abc-def012345678",
-  "storageKey": "storage/blobs/2026/10/f7d8c9e0.bin",
-  "actualSize": 1048576,
-  "actualSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-}
-
-// Response: MessageType.CommitVersionResult
-{
+  "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
   "versionNumber": 1,
-  "storageKey": "storage/blobs/2026/10/f7d8c9e0.bin",
+  "expectedSize": 1048576,
+  "expectedSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+
+// Response: MessageType.StoreFileReady
+{
+  "operationId": "f7d8c9e0-1234-5678-9abc-def012345678",
+  "accepted": true,
+  "errorCode": null,
+  "errorMessage": null
+}
+```
+
+### 4. `StoreFileResult`
+```json
+// Response: MessageType.StoreFileResult
+{
+  "operationId": "f7d8c9e0-1234-5678-9abc-def012345678",
   "success": true,
+  "storageKey": "clients/3fa85f64-5717-4562-b3fc-2c963f66afa6/backup-sets/a1b2c3d4-e5f6-7890-abcd-ef1234567890/files/b2c3d4e5-f6a7-8901-bcde-f0123456789a/versions/0000000001.bin",
+  "actualSize": 1048576,
+  "actualSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "errorCode": null,
+  "errorMessage": null
+}
+```
+
+### 5. `GetStoredFile` и `GetStoredFileResult`
+```json
+// Request: MessageType.GetStoredFile
+{
+  "storageKey": "clients/3fa85f64-5717-4562-b3fc-2c963f66afa6/backup-sets/a1b2c3d4-e5f6-7890-abcd-ef1234567890/files/b2c3d4e5-f6a7-8901-bcde-f0123456789a/versions/0000000001.bin"
+}
+
+// Response: MessageType.GetStoredFileResult
+{
+  "storageKey": "clients/3fa85f64-5717-4562-b3fc-2c963f66afa6/backup-sets/a1b2c3d4-e5f6-7890-abcd-ef1234567890/files/b2c3d4e5-f6a7-8901-bcde-f0123456789a/versions/0000000001.bin",
+  "success": true,
+  "size": 1048576,
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "errorCode": null,
   "errorMessage": null
 }
 ```

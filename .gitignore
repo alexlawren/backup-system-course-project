@@ -6,6 +6,9 @@
 # dotenv files
 .env
 
+# Physical storage data
+data/
+
 # User-specific files
 *.rsuser
 *.suo

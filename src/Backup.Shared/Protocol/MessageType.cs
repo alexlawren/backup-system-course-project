@@ -50,7 +50,9 @@ public enum MessageType
     ResolveVersionResult,
 
     StoreFile,
+    StoreFileReady,
     StoreFileResult,
     GetStoredFile,
+    GetStoredFileResult,
     StoredFile
 }

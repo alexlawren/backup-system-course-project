@@ -1,8 +1,8 @@
 using System.Net;
 using System.Net.Sockets;
-using Backup.Shared.Messages;
 using Backup.Shared.Protocol;
 using Backup.StorageService.Configuration;
+using Backup.StorageService.Storage;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -12,24 +12,37 @@ namespace Backup.StorageService;
 public class StorageServerWorker : BackgroundService
 {
     private readonly ILogger<StorageServerWorker> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly StorageServiceOptions _options;
+    private readonly IFileStorageService _storageService;
     private TcpListener? _listener;
 
     public StorageServerWorker(
         ILogger<StorageServerWorker> logger,
-        IOptions<StorageServiceOptions> options)
+        ILoggerFactory loggerFactory,
+        IOptions<StorageServiceOptions> options,
+        IFileStorageService storageService)
     {
         _logger = logger;
+        _loggerFactory = loggerFactory;
         _options = options.Value;
+        _storageService = storageService;
     }
+
+    public int? BoundPort => (_listener?.LocalEndpoint as IPEndPoint)?.Port;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Ensure storage directory structure is initialized on worker start
+        _storageService.Initialize();
+
         var ip = IPAddress.Parse(_options.Host);
         _listener = new TcpListener(ip, _options.Port);
         _listener.Start();
 
-        _logger.LogInformation("[StorageService] Listening on {Host}:{Port}", _options.Host, _options.Port);
+        var actualPort = (_listener.LocalEndpoint as IPEndPoint)?.Port ?? _options.Port;
+        _logger.LogInformation("[StorageService] Listening on {Host}:{Port}. Root storage: '{RootPath}'",
+            _options.Host, actualPort, _storageService.RootPath);
 
         try
         {
@@ -65,57 +78,10 @@ public class StorageServerWorker : BackgroundService
             using (client)
             await using (var stream = client.GetStream())
             {
-                var reader = new ProtocolFrameReader();
-                var writer = new ProtocolFrameWriter();
+                var dispatcherLogger = _loggerFactory.CreateLogger<StorageMessageDispatcher>();
+                var dispatcher = new StorageMessageDispatcher(_storageService, dispatcherLogger);
 
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    var header = await reader.ReadHeaderAsync(stream, cancellationToken);
-                    if (header == null)
-                    {
-                        break; // Normal client disconnect
-                    }
-
-                    switch (header.MessageType)
-                    {
-                        case MessageType.Hello:
-                            var helloReq = await reader.ReadJsonBodyAsync<HelloRequest>(stream, header.BodyLength, cancellationToken);
-                            _logger.LogInformation("[StorageService] Received Hello from '{ClientName}'", helloReq?.ClientName ?? "Unknown");
-
-                            var helloAck = new HelloResponse
-                            {
-                                ServerName = "Backup.StorageService",
-                                Version = "1.0",
-                                Success = true,
-                                Message = "StorageService is ready."
-                            };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.HelloAck, helloAck, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-
-                        case MessageType.Ping:
-                            var pingMsg = await reader.ReadJsonBodyAsync<PingMessage>(stream, header.BodyLength, cancellationToken);
-                            _logger.LogInformation("[StorageService] Received Ping (MsgId: {MessageId})", header.MessageId);
-
-                            var pongMsg = new PingMessage { Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.Pong, pongMsg, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-
-                        default:
-                            _logger.LogWarning("[StorageService] Unhandled MessageType: {MessageType}", header.MessageType);
-                            if (header.BodyLength > 0)
-                            {
-                                await reader.ReadBodyBytesAsync(stream, header.BodyLength, cancellationToken);
-                            }
-
-                            var errorMsg = new ErrorMessage
-                            {
-                                Code = "NOT_IMPLEMENTED",
-                                Message = $"MessageType '{header.MessageType}' is not handled in Change-set #1."
-                            };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.Error, errorMsg, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-                    }
-                }
+                await dispatcher.ProcessConnectionAsync(stream, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

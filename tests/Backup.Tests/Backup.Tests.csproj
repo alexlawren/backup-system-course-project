@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
@@ -23,6 +23,7 @@
     <ProjectReference Include="..\..\src\Backup.Shared\Backup.Shared.csproj" />
     <ProjectReference Include="..\..\src\Backup.MetadataService\Backup.MetadataService.csproj" />
     <ProjectReference Include="..\..\src\Backup.SyncGateway\Backup.SyncGateway.csproj" />
+    <ProjectReference Include="..\..\src\Backup.StorageService\Backup.StorageService.csproj" />
   </ItemGroup>
 
 </Project>
