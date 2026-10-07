@@ -3,6 +3,7 @@ namespace Backup.MetadataService.Entities;
 public class FileVersionEntity
 {
     public Guid Id { get; set; }
+    public Guid OperationId { get; set; }
     public Guid FileId { get; set; }
     public int VersionNumber { get; set; }
     public long Size { get; set; }

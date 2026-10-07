@@ -1,6 +1,17 @@
 using Backup.Client.Web.Components;
+using Backup.Client.Web.Configuration;
+using Backup.Client.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Gateway options
+builder.Services.Configure<GatewayOptions>(
+    builder.Configuration.GetSection(GatewayOptions.SectionName));
+
+// Register Client services
+builder.Services.AddSingleton<IClientIdentityService, ClientIdentityService>();
+builder.Services.AddTransient<BackupGatewayClient>();
+builder.Services.AddScoped<IBackupClientService, BackupClientService>();
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
@@ -13,7 +24,6 @@ if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
 }
-
 
 app.UseAntiforgery();
 

@@ -8,7 +8,7 @@ namespace Backup.SyncGateway.Clients;
 /// Client helper communicating with Backup.StorageService over TCP Protocol v1.
 /// Implements streaming binary upload and download with bounded buffering.
 /// </summary>
-public class StorageServiceClient : IAsyncDisposable, IDisposable
+public class StorageServiceClient : IStorageServiceClient
 {
     private readonly string _host;
     private readonly int _port;

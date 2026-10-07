@@ -49,6 +49,7 @@ public class StorageSmokeVerificationTests
 
         var gatewayWorker = new GatewayServerWorker(
             NullLogger<GatewayServerWorker>.Instance,
+            NullLoggerFactory.Instance,
             gatewayOptions,
             downstreamOptions);
 

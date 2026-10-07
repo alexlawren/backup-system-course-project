@@ -29,6 +29,8 @@ public class MetadataServerWorker : BackgroundService
         _reader = reader;
     }
 
+    public int? BoundPort => (_listener?.LocalEndpoint as IPEndPoint)?.Port;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var ip = IPAddress.Parse(_options.Host);

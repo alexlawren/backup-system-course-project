@@ -1,18 +1,34 @@
 @page "/"
 @rendermode InteractiveServer
+@using Backup.Client.Web.Services
+@using Backup.Shared.Messages
+@inject IBackupClientService BackupService
+@inject ILogger<Home> Logger
 
-<PageTitle>Backup System - Course Project</PageTitle>
+<PageTitle>Backup System - Course Project Diagnostic</PageTitle>
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Change-set #1</div>
-        <h1>Backup System</h1>
-        <p class="subtitle">Course Project — «Программирование сетевых приложений»</p>
+        <div class="badge-tag">Change-set #4 — E2E Orchestration</div>
+        <h1>Course Project / Backup Test</h1>
+        <p class="subtitle">«Клиент-серверная система резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений»</p>
     </header>
 
+    <!-- Services Status Section -->
     <section class="card-section">
-        <h2>Architecture status:</h2>
+        <h2>System Architecture & Connectivity</h2>
         <div class="status-grid">
+            <div class="status-card @(isGatewayConnected ? "active" : "")">
+                <div class="status-indicator @(isGatewayConnected ? "online" : "pending")"></div>
+                <div class="status-info">
+                    <span class="status-name">Sync Gateway</span>
+                    <span class="status-role">TCP Entry Point (127.0.0.1:5000)</span>
+                    <span class="status-badge @(isGatewayConnected ? "badge-green" : "badge-amber")">
+                        @(isGatewayConnected ? "Connected" : "Disconnected / Offline")
+                    </span>
+                </div>
+            </div>
+
             <div class="status-card active">
                 <div class="status-indicator online"></div>
                 <div class="status-info">
@@ -21,36 +37,148 @@
                     <span class="status-badge badge-green">Running</span>
                 </div>
             </div>
+        </div>
 
-            <div class="status-card">
-                <div class="status-indicator pending"></div>
-                <div class="status-info">
-                    <span class="status-name">Sync Gateway</span>
-                    <span class="status-role">TCP Entry Point (127.0.0.1:5000)</span>
-                    <span class="status-badge badge-amber">Not connected / placeholder</span>
-                </div>
-            </div>
-
-            <div class="status-card">
-                <div class="status-indicator placeholder"></div>
-                <div class="status-info">
-                    <span class="status-name">Metadata Service</span>
-                    <span class="status-role">TCP 127.0.0.1:5001 (PostgreSQL placeholder)</span>
-                    <span class="status-badge badge-gray">Downstream placeholder</span>
-                </div>
-            </div>
-
-            <div class="status-card">
-                <div class="status-indicator placeholder"></div>
-                <div class="status-info">
-                    <span class="status-name">Storage Service</span>
-                    <span class="status-role">TCP 127.0.0.1:5002 (File Storage placeholder)</span>
-                    <span class="status-badge badge-gray">Downstream placeholder</span>
-                </div>
-            </div>
+        <div style="margin-top: 1rem;">
+            <button class="btn btn-secondary" @onclick="CheckGatewayConnectionAsync" disabled="@isLoading">
+                <span>🔄 Ping Gateway</span>
+            </button>
         </div>
     </section>
 
+    <!-- Client Identity Section -->
+    <section class="card-section">
+        <h2>Client Identity (Local Station)</h2>
+        <div class="diagnostic-section">
+            <div class="kv-table">
+                <span class="kv-key">Machine Name:</span>
+                <span class="kv-value">@(clientState?.MachineName ?? Environment.MachineName)</span>
+
+                <span class="kv-key">Client ID:</span>
+                <span class="kv-value">
+                    @if (clientState?.ClientId != null && clientState.ClientId != Guid.Empty)
+                    {
+                        @clientState.ClientId
+                    }
+                    else
+                    {
+                        <span style="color: var(--warning);">Not registered yet</span>
+                    }
+                </span>
+
+                <span class="kv-key">State Storage:</span>
+                <span class="kv-value">data/client/client-state.json (atomic safe write)</span>
+            </div>
+
+            <div>
+                <button class="btn btn-primary" @onclick="RegisterClientAsync" disabled="@isLoading">
+                    <span>📝 Register Client via Gateway</span>
+                </button>
+            </div>
+
+            @if (!string.IsNullOrEmpty(clientStatusMessage))
+            {
+                <div class="status-badge @(clientStatusIsError ? "badge-amber" : "badge-green")">
+                    @clientStatusMessage
+                </div>
+            }
+        </div>
+    </section>
+
+    <!-- Backup Set Section -->
+    <section class="card-section">
+        <h2>Backup Set Configuration</h2>
+        <div class="diagnostic-section">
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="backupSetName">Backup Set Name:</label>
+                    <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="e.g. MyDocuments" disabled="@isLoading" />
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="localRootPath">Local Root Directory Path:</label>
+                    <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="e.g. C:\backup_data" disabled="@isLoading" />
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <button class="btn btn-primary" @onclick="CreateBackupSetAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
+                    <span>📁 Create Backup Set</span>
+                </button>
+            </div>
+
+            @if (activeBackupSetId != Guid.Empty)
+            {
+                <div class="kv-table" style="margin-top: 0.5rem;">
+                    <span class="kv-key">Active Set ID:</span>
+                    <span class="kv-value">@activeBackupSetId</span>
+                </div>
+            }
+
+            @if (!string.IsNullOrEmpty(backupSetMessage))
+            {
+                <div class="status-badge @(backupSetIsError ? "badge-amber" : "badge-green")">
+                    @backupSetMessage
+                </div>
+            }
+        </div>
+    </section>
+
+    <!-- Manual File Backup Test Section -->
+    <section class="card-section">
+        <h2>Manual File Backup Test</h2>
+        <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
+            Specify an absolute local file path inside the Local Root Path. Gateway orchestrates: PrepareVersion &rarr; UploadRequired &rarr; streaming UploadFile &rarr; Storage StoreFile &rarr; Metadata CommitVersion.
+        </p>
+
+        <div class="diagnostic-section">
+            <div class="form-group">
+                <label class="form-label" for="manualFilePath">Absolute Local File Path:</label>
+                <input id="manualFilePath" class="form-input" @bind="manualFilePath" placeholder="e.g. C:\backup_data\test.txt" disabled="@isLoading" />
+            </div>
+
+            <div>
+                <button class="btn btn-primary" @onclick="BackupSingleFileAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))">
+                    <span>🚀 Backup File</span>
+                </button>
+            </div>
+
+            @if (backupOperationResult != null)
+            {
+                <div class="result-box @(backupOperationResult.Success ? "success" : "error")">
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <span style="font-weight: 600; font-size: 1.05rem;">
+                            @(backupOperationResult.Success ? "✅ Backup Completed Successfully" : "❌ Backup Failed")
+                        </span>
+                        <span class="status-badge @(backupOperationResult.Success ? "badge-green" : "badge-red")">
+                            @(backupOperationResult.Success ? "SUCCESS" : backupOperationResult.ErrorCode ?? "ERROR")
+                        </span>
+                    </div>
+
+                    <div class="kv-table">
+                        <span class="kv-key">File ID:</span>
+                        <span class="kv-value">@(backupOperationResult.FileId?.ToString() ?? "—")</span>
+
+                        <span class="kv-key">Version:</span>
+                        <span class="kv-value">@(backupOperationResult.VersionNumber?.ToString() ?? "—")</span>
+
+                        <span class="kv-key">Storage Key:</span>
+                        <span class="kv-value">@(backupOperationResult.StorageKey ?? "—")</span>
+
+                        @if (!backupOperationResult.Success)
+                        {
+                            <span class="kv-key">Error Code:</span>
+                            <span class="kv-value" style="color: #f87171;">@backupOperationResult.ErrorCode</span>
+
+                            <span class="kv-key">Error Message:</span>
+                            <span class="kv-value" style="color: #f87171;">@backupOperationResult.ErrorMessage</span>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    </section>
+
+    <!-- Protocol Specs Summary -->
     <section class="card-section protocol-overview">
         <h2>TCP Protocol v1 Specifications</h2>
         <div class="protocol-grid">
@@ -68,8 +196,145 @@
             </div>
             <div class="protocol-item">
                 <span class="label">Transport Layer</span>
-                <span class="val">Raw TCP Sockets (Async I/O + Streaming)</span>
+                <span class="val">Raw TCP Sockets (Zero-Copy Relay Streaming)</span>
             </div>
         </div>
     </section>
 </div>
+
+@code {
+    private ClientState? clientState;
+    private bool isGatewayConnected;
+    private bool isLoading;
+
+    private string clientStatusMessage = "";
+    private bool clientStatusIsError;
+
+    private string backupSetName = "DefaultSet";
+    private string localRootPath = "";
+    private Guid activeBackupSetId = Guid.Empty;
+    private string backupSetMessage = "";
+    private bool backupSetIsError;
+
+    private string manualFilePath = "";
+    private UploadCompletedResponse? backupOperationResult;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            clientState = await BackupService.GetIdentityAsync();
+            if (string.IsNullOrEmpty(localRootPath))
+            {
+                localRootPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "backup_test");
+            }
+            await CheckGatewayConnectionAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error initializing diagnostic UI");
+        }
+    }
+
+    private async Task CheckGatewayConnectionAsync()
+    {
+        isLoading = true;
+        try
+        {
+            isGatewayConnected = await BackupService.PingGatewayAsync();
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task RegisterClientAsync()
+    {
+        isLoading = true;
+        clientStatusMessage = "";
+        try
+        {
+            var success = await BackupService.EnsureRegisteredAsync();
+            if (success)
+            {
+                clientState = await BackupService.GetIdentityAsync();
+                clientStatusMessage = $"Client successfully registered! ClientId: {clientState.ClientId}";
+                clientStatusIsError = false;
+            }
+            else
+            {
+                clientStatusMessage = "Registration failed: Gateway or downstream error.";
+                clientStatusIsError = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            clientStatusMessage = $"Error: {ex.Message}";
+            clientStatusIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task CreateBackupSetAsync()
+    {
+        if (string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))
+            return;
+
+        isLoading = true;
+        backupSetMessage = "";
+        try
+        {
+            var response = await BackupService.CreateBackupSetAsync(backupSetName, localRootPath);
+            if (response.Success && response.BackupSetId != Guid.Empty)
+            {
+                activeBackupSetId = response.BackupSetId;
+                backupSetMessage = $"Backup set '{response.Name}' created successfully!";
+                backupSetIsError = false;
+            }
+            else
+            {
+                backupSetMessage = $"Failed to create backup set: {response.ErrorMessage ?? "Unknown error"}";
+                backupSetIsError = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            backupSetMessage = $"Error: {ex.Message}";
+            backupSetIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task BackupSingleFileAsync()
+    {
+        if (activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))
+            return;
+
+        isLoading = true;
+        backupOperationResult = null;
+        try
+        {
+            backupOperationResult = await BackupService.BackupSingleFileAsync(activeBackupSetId, localRootPath, manualFilePath);
+        }
+        catch (Exception ex)
+        {
+            backupOperationResult = new UploadCompletedResponse
+            {
+                Success = false,
+                ErrorCode = "CLIENT_EXCEPTION",
+                ErrorMessage = ex.Message
+            };
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+}

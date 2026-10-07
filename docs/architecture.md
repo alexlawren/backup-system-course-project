@@ -208,3 +208,117 @@ data/
 2. **`StorageMessageDispatcher`**: Изолированный диспетчер конкретного TCP-соединения, отслеживающий состояние двухфазного рукопожатия (`StoreFile` -> `UploadFile`), защищающий от параллельного чередования кадров (no interleaving).
 3. **`FileStorageService`**: Низкоуровневый сервис работы с дисковым хранилищем, временными файлами, хэшированием и атомарным перемещением.
 4. **`StorageServiceClient`** (в `Backup.SyncGateway`): Клиентская абстракция для выполнения вызовов `Hello`, `StoreFileAsync` (streaming) и `GetStoredFileAsync` (streaming).
+
+---
+
+## 7. Сквозная оркестрация резервного копирования (Change-set #4: End-to-End Orchestration)
+
+### 7.1. Роль и архитектурные границы SyncGateway
+`Backup.SyncGateway` выступает центральным координирующим шлюзом и оркестратором процессов синхронизации:
+- **Клиент (`Backup.Client.Web`) подключается ИСКЛЮЧИТЕЛЬНО к `SyncGateway`**. Клиент не знает сетевых адресов и портов `MetadataService` и `StorageService`, не имеет прямого доступа к PostgreSQL.
+- **`MetadataService` никогда не пишет физические файлы резервных копий.**
+- **`StorageService` никогда не обращается к PostgreSQL и базе данных метаданных.**
+- **Никаких распределенных транзакций (2PC):** система использует надежный поэтапный рабочий процесс (**Staged Workflow**):
+  `PrepareVersion` $\rightarrow$ `StoreFile` (физическая запись) $\rightarrow$ `CommitVersion` (фиксация в БД).
+
+---
+
+### 7.2. Последовательная диаграмма сквозного резервного копирования (Sequence Diagram)
+
+```
+[Client.Web]                     [SyncGateway]                 [MetadataService]              [StorageService]
+     |                                |                                |                             |
+     |--- 1. FileChanged (Meta) ----->|                                |                             |
+     |    (BackupSetId, RelPath,      |--- 2. PrepareVersion --------->|                             |
+     |     Size, Sha256)              |                                |-- Проверка committed Sha -->|
+     |                                |                                |-- Создание PendingOp ------>|
+     |                                |<-- 3. PrepareVersionResult ----|                             |
+     |                                |    (UploadRequired=true,       |                             |
+     |                                |     OpId, ExpVersion)          |                             |
+     |<-- 4. UploadRequired ----------|                                |                             |
+     |                                |                                |                             |
+     |--- 5. Binary UploadFile ------>|                                |                             |
+     |    (Socket Stream)             |--- 6. StoreFileDescriptor ---------------------------------->|
+     |                                |<-- 7. StoreFileReady ----------------------------------------|
+     |                                |--- 8. Relay Binary Stream (Zero-Copy Bounded Stream) ------->|
+     |                                |                                |                             |-- Streaming write to .tmp
+     |                                |                                |                             |-- SHA-256 incremental verify
+     |                                |                                |                             |-- Atomic File.Move
+     |                                |<-- 9. StoreFileResult (StorageKey, ActualSize, ActualSha) ---|
+     |                                |                                |                             |
+     |                                |--- 10. CommitVersion --------->|                             |
+     |                                |    (OpId, StorageKey,          |== BEGIN DB TRANSACTION ====>|
+     |                                |     ActualSize, ActualSha)     |-- Валидация PendingOp ------>|
+     |                                |                                |-- Создание FileVersion ----->|
+     |                                |                                |-- Update File.CurrentVer --->|
+     |                                |                                |-- Запись ChangeLog --------->|
+     |                                |                                |== COMMIT DB TRANSACTION ===>|
+     |                                |<-- 11. CommitVersionResult ----|                             |
+     |<-- 12. UploadCompleted --------|    (Success=true, VerNum)      |                             |
+     |    (Success, Version, Key)     |                                |                             |
+```
+
+---
+
+### 7.3. Почему Storage выполняется ДО Commit метаданных
+Если бы коммит метаданных выполнялся до физического сохранения файла на диске:
+1. База данных объявила бы версию $N$ актуальной (`CurrentVersionNumber = N`).
+2. При сбое сети, переполнении диска или аварии `StorageService` физический файл не был бы записан.
+3. Система оказалась бы в критически некорректном состоянии: метаданные ссылаются на отсутствующий блоб, а восстановление файла невозможно.
+
+Выполнение `StorageService.StoreFile` до `CommitVersion` гарантирует, что **к моменту фиксации версии в PostgreSQL физические байты уже надежно записаны на диск, их размер и SHA-256 проверены**.
+
+---
+
+### 7.4. Поведение при сбое и неопределенности коммита (Uncertain Commit & Orphan Blobs)
+1. **При сбое StorageService:**
+   - Gateway прерывает процесс и **НЕ вызывает** `CommitVersion`.
+   - Клиент получает `UploadCompletedResponse` с `Success = false` и кодом ошибки хранилища.
+   - Метаданные не изменяются, номер версии в БД не увеличивается.
+2. **При тайм-ауте или сетевом сбое во время вызова `CommitVersion`:**
+   - Gateway **НЕ удаляет** физический файл из хранилища.
+   - Причина: при сетевом тайм-ауте невозможно достоверно знать, зафиксировал ли PostgreSQL транзакцию до разрыва TCP-сокета или нет. Удаление блоба может привести к безвозвратной потере данных.
+   - Gateway предпринимает **до 3 повторных попыток (Retry)** с контролируемой задержкой через `Task.Delay`.
+   - Если статус коммита остается неопределенным, клиенту возвращается ошибка `METADATA_COMMIT_UNCERTAIN`.
+   - Поскольку путь `StorageKey` детерминирован, а версии неизменяемы, следующий сеанс синхронизации восстановит согласованность.
+
+---
+
+### 7.5. Идемпотентность CommitVersion в MetadataService
+Для надежного повтора коммита сущность `FileVersionEntity` дополнена полем:
+```csharp
+public Guid OperationId { get; set; }
+```
+На уровне PostgreSQL создан **уникальный индекс** `IX_file_versions_OperationId`.
+
+**Алгоритм обработки `CommitVersion`:**
+1. Поиск существующей записи в `file_versions` по `OperationId`.
+2. Если версия уже существует:
+   - Проверяется совпадение `StorageKey`, `Size` и `Sha256`.
+   - Если данные совпадают: возвращается `Success = true`, `AlreadyCommitted = true` (вторая версия не создается).
+   - Если переданные параметры конфликтуют с уже зафиксированной версией: возвращается ошибка `COMMIT_CONFLICT`.
+3. Если версия с таким `OperationId` отсутствует: выполняется стандартная фиксация транзакции с удалением записи из `pending_file_operations`.
+
+---
+
+### 7.6. Идентификация рабочей станции (Client Identity)
+- Сервис `ClientIdentityService` управляет локальным состоянием рабочей станции в файле:
+  `data/client/client-state.json`.
+- Запись файла выполняется атомарно: запись во временный файл $\rightarrow$ атомарная замена `File.Move(..., overwrite: true)`.
+- При первом запуске `ClientId` отсутствует. Клиент отправляет запрос `RegisterClient` в `SyncGateway`, который маршрутизирует его в `MetadataService`. Полученный GUID сохраняется локально.
+- При последующих запусках сохраненный `ClientId` передается в заголовках и обновляет поле `LastSeenAtUtc` в базе данных.
+
+---
+
+### 7.7. Потоковый ретранслятор Gateway (Zero-Copy Streaming Relay)
+Шлюз `SyncGateway` не буферизует файл целиком в оперативную память и не создает промежуточных копий на жестком диске.
+Используется обертка `BoundedReadStream`, ограничивающая поток чтения ровно `header.BodyLength` байтами. Поток сокета клиента передается напрямую в `StorageServiceClient.StoreFileAsync`, который пересылает данные чанками по 64 KiB в сокет `StorageService`.
+
+---
+
+### 7.8. Сессии клиентов на шлюзе и отсутствие мультиплексирования
+- Каждое входящее TCP-соединение обрабатывается отдельным экземпляром `GatewaySessionHandler` с изолированным состоянием `GatewayClientSession`.
+- Состояние отслеживает активный контекст загрузки (`ActiveUploadContext`).
+- Попытка отправить второй запрос `FileChanged` до завершения активной загрузки отклоняется с кодом `UPLOAD_IN_PROGRESS`.
+- Попытка передать бинарный кадр `UploadFile` без предварительного `UploadRequired` отклоняется с кодом `UPLOAD_NOT_EXPECTED`.
+- Параллельные клиенты обслуживаются независимо без взаимного влияния.

@@ -2,7 +2,7 @@
 
 Курсовой проект по дисциплине «Программирование сетевых приложений».
 
-**Change-set #3:** Storage Service + Physical File Storage (микросервис физического хранения версий файлов, потоковая передача binary stream с ограниченным буфером 64 KiB, инкрементальный расчет SHA-256, временная запись `.tmp/{OpId}.part`, валидация размера, атомарный коммит в детерминированную структуру `StorageKey`, гарантия неизменяемости версий и идемпотентность, чтение сохраненных блобов через `GetStoredFile`, клиент `StorageServiceClient` в `SyncGateway`).
+**Change-set #4:** END-TO-END BACKUP ORCHESTRATION (сквозная оркестрация резервного копирования одиночного файла: `Client.Web` -> `SyncGateway` -> `MetadataService` + `StorageService`. Рабочий процесс `PrepareVersion` -> `UploadRequired` -> binary streaming `UploadFile` через Gateway -> `StoreFile` -> идемпотентный `CommitVersion` с retry -> `UploadCompleted`. Потоковый zero-copy relay на шлюзе, изоляция клиентских сессий, постоянная идентификация клиента в `data/client/client-state.json`, проксирование регистрации и создания наборов через Gateway, минимальный диагностический UI для ручной верификации).
 
 ---
 
@@ -53,11 +53,11 @@
 dotnet ef database update --project src/Backup.MetadataService --startup-project src/Backup.MetadataService
 ```
 
-*Создаются таблицы:*
+*Создаются и обновляются таблицы:*
 - `clients` — зарегистрированные клиенты;
 - `backup_sets` — наборы резервного копирования;
 - `files` — метаданные файлов с `UNIQUE (BackupSetId, RelativePath)`;
-- `file_versions` — зафиксированные ревизии с `UNIQUE (FileId, VersionNumber)`;
+- `file_versions` — зафиксированные ревизии с `UNIQUE (FileId, VersionNumber)` и `UNIQUE (OperationId)` для идемпотентного коммита;
 - `change_logs` — аудит и журнал событий (`CREATE`, `MODIFY`, `DELETE`, `RENAME`);
 - `pending_file_operations` — подготовленные транзакции загрузки (Prepare $\rightarrow$ Commit).
 
@@ -72,18 +72,21 @@ dotnet restore
 # Сборка решения
 dotnet build
 
-# Запуск полного набора модульных и интеграционных тестов (88 тестов)
+# Запуск полного набора модульных и интеграционных тестов (110 тестов)
 dotnet test
 ```
 
 Тестовый набор включает:
 - 12 тестов фрейминга и потокового чтения Protocol v1 (включая фрагментированные TCP-потоки);
 - 19 тестов валидации относительных путей `ProtocolPathValidator` (защита от path traversal, абсолютных путей, спецсимволов);
-- 16 тестов бизнес-логики `MetadataApplicationService` и ограничений реляционной базы данных;
+- 22 теста бизнес-логики `MetadataApplicationService` (включая 6 тестов идемпотентности `CommitVersion`, защиту от повторного создания версии и валидацию конфликтов);
 - 2 комплексных интеграционных теста метаданных (персистентность в PostgreSQL и сокеты TCP Protocol v1);
 - 12 модульных тестов `FileStorageService` и `StorageKeyHelper` (детерминированный ключ, валидация SHA-256, файлы нулевого размера, защита от path traversal, очистка temp-файлов);
 - 26 интеграционных TCP-тестов физического хранилища (сквозной цикл `StoreFile` -> `StoreFileReady` -> `UploadFile` -> `StoreFileResult`, скачивание `GetStoredFile`, конкурентные клиенты, большие файлы 8 MiB, обнаружение конфликтов и идемпотентность, проверка обрыва соединения);
-- 1 сквозной smoke-тест взаимодействия `Backup.SyncGateway` и `Backup.StorageService`.
+- 1 сквозной smoke-тест взаимодействия `Backup.SyncGateway` и `Backup.StorageService`;
+- 13 тестов оркестрации `SyncGateway` (решение `UploadRequired`, изоляция сессий, no interleaving, zero-copy relay, валидация путей, обработка сбоев хранилища, retry при тайм-ауте `CommitVersion`);
+- 2 комплексных E2E-интеграционных теста жизненного цикла резервного копирования v1 $\rightarrow$ v2 и сценария сбоя на реальном кластере;
+- 1 живой интеграционный smoke-тест верификации 4 сервисов.
 
 ---
 

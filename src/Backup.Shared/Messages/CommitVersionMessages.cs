@@ -14,5 +14,7 @@ public class CommitVersionResponse
     public int VersionNumber { get; set; }
     public string? StorageKey { get; set; }
     public bool Success { get; set; } = true;
+    public bool AlreadyCommitted { get; set; }
+    public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
 }

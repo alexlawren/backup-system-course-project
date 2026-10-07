@@ -113,6 +113,11 @@
 - `GetStoredFileResult`: Дескриптор файла перед передачей потока (`Success`, `StorageKey`, `Size`, `Sha256`, `ErrorCode`, `ErrorMessage`).
 - `StoredFile`: Бинарный поток байт запрошенного файла (`BodyLength = Size`, `CorrelationId = getStoredFileMessageId`).
 
+### Внешний рабочий процесс резервного копирования (Client <-> Gateway):
+- `FileChanged`: Первичное уведомление клиента шлюзу о создании или изменении локального файла (`BackupSetId`, `RelativePath`, `Size`, `Sha256`).
+- `UploadRequired`: Ответ шлюза о необходимости физической загрузки (`UploadRequired: bool`, `OperationId`, `FileId`, `VersionNumber`).
+- `UploadCompleted`: Финальный ответ клиенту о завершении резервного копирования (`Success: bool`, `FileId`, `VersionNumber`, `StorageKey`, `AlreadyCommitted: bool`, `ErrorCode`, `ErrorMessage`).
+
 ---
 
 ## 5. Протокольный цикл сохранения и получения файлов
@@ -248,3 +253,59 @@ Gateway (Client)                                          StorageService
   "errorMessage": null
 }
 ```
+
+---
+
+## 6. Форматы сообщений сквозного резервного копирования (Change-set #4)
+
+### 6.1. `FileChanged` (Клиент -> Gateway)
+```json
+{
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "relativePath": "documents/report.pdf",
+  "size": 1048576,
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+```
+
+### 6.2. `UploadRequired` (Gateway -> Клиент)
+```json
+{
+  "uploadRequired": true,
+  "operationId": "f7d8c9e0-1234-5678-9abc-def012345678",
+  "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
+  "versionNumber": 1
+}
+```
+*Примечание:* Если хэш содержимого совпадает с уже зафиксированной версией в базе данных, Gateway немедленно возвращает `UploadCompleted` с флагом `AlreadyCommitted = true` без запроса физической передачи файла.
+
+### 6.3. `UploadCompleted` (Gateway -> Клиент)
+```json
+{
+  "success": true,
+  "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
+  "versionNumber": 1,
+  "storageKey": "clients/3fa85f64-5717-4562-b3fc-2c963f66afa6/backup-sets/a1b2c3d4-e5f6-7890-abcd-ef1234567890/files/b2c3d4e5-f6a7-8901-bcde-f0123456789a/versions/0000000001.bin",
+  "alreadyCommitted": false,
+  "errorCode": null,
+  "errorMessage": null
+}
+```
+
+### 6.4. Коды ошибок прикладного уровня:
+| Код ошибки | Описание |
+| :--- | :--- |
+| `CLIENT_NOT_REGISTERED` | Клиент попытался выполнить операцию до успешной регистрации в Gateway/Metadata. |
+| `BACKUP_SET_NOT_FOUND` | Указанный `BackupSetId` не найден в базе данных метаданных. |
+| `INVALID_LOCAL_FILE` | Локальный файл отсутствует, поврежден или заблокирован другим процессом ОС. |
+| `FILE_CHANGED_DURING_PREPARE` | Файл был изменен на клиенте между этапом расчета SHA-256 и началом передачи. |
+| `UPLOAD_NOT_EXPECTED` | Получен бинарный кадр `UploadFile` без предварительного контекста `UploadRequired`. |
+| `UPLOAD_IN_PROGRESS` | Клиент попытался запустить новую операцию в рамках соединения, где уже идет загрузка. |
+| `METADATA_UNAVAILABLE` | Микросервис метаданных недоступен по сети. |
+| `STORAGE_UNAVAILABLE` | Микросервис физического хранилища недоступен по сети. |
+| `METADATA_COMMIT_UNCERTAIN` | Тайм-аут или разрыв связи при коммите; статус фиксации неизвестен, блоб сохранен. |
+| `INVALID_RELATIVE_PATH` | Относительный путь не прошел строгую проверку безопасности (`ProtocolPathValidator`). |
+| `SIZE_MISMATCH` | Количество переданных байт не совпало с `header.BodyLength` или заявленным размером. |
+| `HASH_MISMATCH` | Контрольная сумма SHA-256 записанных данных не совпала с заявленным хэшем. |
+| `STORAGE_CONFLICT` | В хранилище уже существует версия с другим содержимым под данным ключом. |

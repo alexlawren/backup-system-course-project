@@ -189,6 +189,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                     UploadRequired = false,
                     OperationId = null,
                     FileId = file.Id,
+                    ClientId = backupSet.ClientId,
                     ExpectedVersionNumber = file.CurrentVersionNumber,
                     Success = true
                 };
@@ -228,6 +229,7 @@ public class MetadataApplicationService : IMetadataApplicationService
             UploadRequired = true,
             OperationId = pendingOp.OperationId,
             FileId = file.Id,
+            ClientId = backupSet.ClientId,
             ExpectedVersionNumber = expectedVersionNumber,
             Success = true
         };
@@ -236,6 +238,41 @@ public class MetadataApplicationService : IMetadataApplicationService
     public async Task<CommitVersionResponse> CommitVersionAsync(CommitVersionRequest request, CancellationToken cancellationToken = default)
     {
         await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        // 1. Check if this OperationId was already committed (Idempotency check)
+        var alreadyCommitted = await dbContext.FileVersions
+            .FirstOrDefaultAsync(fv => fv.OperationId == request.OperationId, cancellationToken);
+
+        if (alreadyCommitted != null)
+        {
+            bool matches = alreadyCommitted.Size == request.ActualSize &&
+                           string.Equals(alreadyCommitted.Sha256, request.ActualSha256, StringComparison.OrdinalIgnoreCase) &&
+                           string.Equals(alreadyCommitted.StorageKey, request.StorageKey, StringComparison.OrdinalIgnoreCase);
+
+            if (matches)
+            {
+                _logger.LogInformation("[MetadataService] CommitVersion: Operation {OperationId} was already committed. Returning idempotent success.", request.OperationId);
+                return new CommitVersionResponse
+                {
+                    FileId = alreadyCommitted.FileId,
+                    VersionNumber = alreadyCommitted.VersionNumber,
+                    StorageKey = alreadyCommitted.StorageKey,
+                    Success = true,
+                    AlreadyCommitted = true
+                };
+            }
+
+            _logger.LogWarning("[MetadataService] CommitVersion: Operation {OperationId} conflict with already committed version.", request.OperationId);
+            return new CommitVersionResponse
+            {
+                FileId = alreadyCommitted.FileId,
+                VersionNumber = alreadyCommitted.VersionNumber,
+                Success = false,
+                AlreadyCommitted = true,
+                ErrorCode = "COMMIT_CONFLICT",
+                ErrorMessage = $"Operation {request.OperationId} was already committed with different parameters."
+            };
+        }
 
         await using var tx = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         try
@@ -251,7 +288,8 @@ public class MetadataApplicationService : IMetadataApplicationService
                 return new CommitVersionResponse
                 {
                     Success = false,
-                    ErrorMessage = $"Pending operation {request.OperationId} was not found or has already been committed."
+                    ErrorCode = "OPERATION_NOT_FOUND",
+                    ErrorMessage = $"Pending operation {request.OperationId} was not found."
                 };
             }
 
@@ -261,6 +299,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 return new CommitVersionResponse
                 {
                     Success = false,
+                    ErrorCode = "SIZE_MISMATCH",
                     ErrorMessage = $"Size mismatch for operation {request.OperationId}. Expected: {pending.ExpectedSize}, Actual: {request.ActualSize}."
                 };
             }
@@ -271,6 +310,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 return new CommitVersionResponse
                 {
                     Success = false,
+                    ErrorCode = "HASH_MISMATCH",
                     ErrorMessage = $"Sha256 mismatch for operation {request.OperationId}. Expected: {pending.ExpectedSha256}, Actual: {request.ActualSha256}."
                 };
             }
@@ -286,6 +326,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 return new CommitVersionResponse
                 {
                     Success = false,
+                    ErrorCode = "VERSION_EXISTS",
                     ErrorMessage = $"Version {pending.ExpectedVersionNumber} already exists for file {pending.FileId}."
                 };
             }
@@ -294,6 +335,7 @@ public class MetadataApplicationService : IMetadataApplicationService
             var fileVersion = new FileVersionEntity
             {
                 Id = Guid.NewGuid(),
+                OperationId = pending.OperationId,
                 FileId = pending.FileId,
                 VersionNumber = pending.ExpectedVersionNumber,
                 Size = request.ActualSize,
@@ -337,7 +379,8 @@ public class MetadataApplicationService : IMetadataApplicationService
                 FileId = file.Id,
                 VersionNumber = fileVersion.VersionNumber,
                 StorageKey = fileVersion.StorageKey,
-                Success = true
+                Success = true,
+                AlreadyCommitted = false
             };
         }
         catch (Exception ex)

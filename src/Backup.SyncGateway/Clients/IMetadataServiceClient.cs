@@ -1,0 +1,13 @@
+using Backup.Shared.Messages;
+
+namespace Backup.SyncGateway.Clients;
+
+public interface IMetadataServiceClient : IAsyncDisposable
+{
+    Task ConnectAsync(CancellationToken cancellationToken = default);
+    Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default);
+    Task<RegisterClientResponse> RegisterClientAsync(RegisterClientRequest request, CancellationToken cancellationToken = default);
+    Task<CreateBackupSetResponse> CreateBackupSetAsync(CreateBackupSetRequest request, CancellationToken cancellationToken = default);
+    Task<PrepareVersionResponse> PrepareVersionAsync(PrepareVersionRequest request, CancellationToken cancellationToken = default);
+    Task<CommitVersionResponse> CommitVersionAsync(CommitVersionRequest request, CancellationToken cancellationToken = default);
+}

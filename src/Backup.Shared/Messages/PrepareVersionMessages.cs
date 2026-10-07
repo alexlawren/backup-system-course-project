@@ -13,6 +13,7 @@ public class PrepareVersionResponse
     public bool UploadRequired { get; set; }
     public Guid? OperationId { get; set; }
     public Guid FileId { get; set; }
+    public Guid ClientId { get; set; }
     public int ExpectedVersionNumber { get; set; }
     public bool Success { get; set; } = true;
     public string? ErrorMessage { get; set; }

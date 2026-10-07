@@ -563,6 +563,214 @@ public class MetadataServiceTests : IDisposable
         await Assert.ThrowsAsync<DbUpdateException>(() => db2.SaveChangesAsync());
     }
 
+    [Fact]
+    public async Task Test_17_CommitVersion_FirstCallCommitsSuccessfully()
+    {
+        var (_, backupSetId) = await SetupClientAndBackupSetAsync();
+        var prep = await _service.PrepareVersionAsync(new PrepareVersionRequest
+        {
+            BackupSetId = backupSetId,
+            RelativePath = "idempotency_1.txt",
+            Size = 100,
+            Sha256 = "hash_100"
+        });
+
+        Assert.True(prep.Success);
+        Assert.NotNull(prep.OperationId);
+
+        var commit = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId!.Value,
+            StorageKey = "blobs/key_100",
+            ActualSize = 100,
+            ActualSha256 = "hash_100"
+        });
+
+        Assert.True(commit.Success);
+        Assert.False(commit.AlreadyCommitted);
+        Assert.NotEqual(Guid.Empty, commit.FileId);
+        Assert.Equal(1, commit.VersionNumber);
+    }
+
+    [Fact]
+    public async Task Test_18_CommitVersion_SameOperationIdSecondCommitReturnsSuccess()
+    {
+        var (_, backupSetId) = await SetupClientAndBackupSetAsync();
+        var prep = await _service.PrepareVersionAsync(new PrepareVersionRequest
+        {
+            BackupSetId = backupSetId,
+            RelativePath = "idempotency_2.txt",
+            Size = 200,
+            Sha256 = "hash_200"
+        });
+
+        var commit1 = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId!.Value,
+            StorageKey = "blobs/key_200",
+            ActualSize = 200,
+            ActualSha256 = "hash_200"
+        });
+        Assert.True(commit1.Success);
+
+        var commit2 = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId.Value,
+            StorageKey = "blobs/key_200",
+            ActualSize = 200,
+            ActualSha256 = "hash_200"
+        });
+
+        Assert.True(commit2.Success);
+        Assert.Equal(commit1.FileId, commit2.FileId);
+        Assert.Equal(commit1.VersionNumber, commit2.VersionNumber);
+    }
+
+    [Fact]
+    public async Task Test_19_CommitVersion_SecondCommitDoesNotCreateSecondFileVersion()
+    {
+        var (_, backupSetId) = await SetupClientAndBackupSetAsync();
+        var prep = await _service.PrepareVersionAsync(new PrepareVersionRequest
+        {
+            BackupSetId = backupSetId,
+            RelativePath = "idempotency_3.txt",
+            Size = 300,
+            Sha256 = "hash_300"
+        });
+
+        await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId!.Value,
+            StorageKey = "blobs/key_300",
+            ActualSize = 300,
+            ActualSha256 = "hash_300"
+        });
+
+        await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId.Value,
+            StorageKey = "blobs/key_300",
+            ActualSize = 300,
+            ActualSha256 = "hash_300"
+        });
+
+        await using var db = await _contextFactory.CreateDbContextAsync();
+        var versions = await db.FileVersions.Where(v => v.FileId == prep.FileId).ToListAsync();
+        Assert.Single(versions);
+    }
+
+    [Fact]
+    public async Task Test_20_CommitVersion_AlreadyCommittedResponseIndicatesAlreadyCommitted()
+    {
+        var (_, backupSetId) = await SetupClientAndBackupSetAsync();
+        var prep = await _service.PrepareVersionAsync(new PrepareVersionRequest
+        {
+            BackupSetId = backupSetId,
+            RelativePath = "idempotency_4.txt",
+            Size = 400,
+            Sha256 = "hash_400"
+        });
+
+        var first = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId!.Value,
+            StorageKey = "blobs/key_400",
+            ActualSize = 400,
+            ActualSha256 = "hash_400"
+        });
+        Assert.False(first.AlreadyCommitted);
+
+        var second = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId.Value,
+            StorageKey = "blobs/key_400",
+            ActualSize = 400,
+            ActualSha256 = "hash_400"
+        });
+        Assert.True(second.AlreadyCommitted);
+    }
+
+    [Fact]
+    public async Task Test_21_CommitVersion_SameOperationIdWithConflictingDataRejected()
+    {
+        var (_, backupSetId) = await SetupClientAndBackupSetAsync();
+        var prep = await _service.PrepareVersionAsync(new PrepareVersionRequest
+        {
+            BackupSetId = backupSetId,
+            RelativePath = "idempotency_5.txt",
+            Size = 500,
+            Sha256 = "hash_500"
+        });
+
+        var first = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId!.Value,
+            StorageKey = "blobs/key_500",
+            ActualSize = 500,
+            ActualSha256 = "hash_500"
+        });
+        Assert.True(first.Success);
+
+        // Attempt second commit with same OperationId but conflicting hash/size
+        var conflict = await _service.CommitVersionAsync(new CommitVersionRequest
+        {
+            OperationId = prep.OperationId.Value,
+            StorageKey = "blobs/key_500_DIFFERENT",
+            ActualSize = 500,
+            ActualSha256 = "hash_CONFICTING"
+        });
+
+        Assert.False(conflict.Success);
+        Assert.Equal("COMMIT_CONFLICT", conflict.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Test_22_CommitVersion_UniqueOperationIdDbConstraintWorks()
+    {
+        var (_, backupSetId) = await SetupClientAndBackupSetAsync();
+
+        await using var db1 = await _contextFactory.CreateDbContextAsync();
+        var file = new FileEntity
+        {
+            Id = Guid.NewGuid(),
+            BackupSetId = backupSetId,
+            RelativePath = "unique_op_test.txt",
+            CurrentVersionNumber = 1,
+            CreatedAtUtc = DateTime.UtcNow,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        db1.Files.Add(file);
+
+        var sharedOpId = Guid.NewGuid();
+        db1.FileVersions.Add(new FileVersionEntity
+        {
+            Id = Guid.NewGuid(),
+            FileId = file.Id,
+            VersionNumber = 1,
+            OperationId = sharedOpId,
+            StorageKey = "key1",
+            Size = 10,
+            Sha256 = "hash1",
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        await db1.SaveChangesAsync();
+
+        await using var db2 = await _contextFactory.CreateDbContextAsync();
+        db2.FileVersions.Add(new FileVersionEntity
+        {
+            Id = Guid.NewGuid(),
+            FileId = file.Id,
+            VersionNumber = 2,
+            OperationId = sharedOpId, // Violates UNIQUE(OperationId)
+            StorageKey = "key2",
+            Size = 20,
+            Sha256 = "hash2",
+            CreatedAtUtc = DateTime.UtcNow
+        });
+
+        await Assert.ThrowsAsync<DbUpdateException>(() => db2.SaveChangesAsync());
+    }
+
     private async Task<(Guid ClientId, Guid BackupSetId)> SetupClientAndBackupSetAsync()
     {
         var client = await _service.RegisterClientAsync(new RegisterClientRequest { Name = "TestClient", MachineName = "TestMachine" });

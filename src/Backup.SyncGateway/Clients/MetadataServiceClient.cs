@@ -7,7 +7,7 @@ namespace Backup.SyncGateway.Clients;
 /// <summary>
 /// Client helper communicating with Backup.MetadataService over Protocol v1.
 /// </summary>
-public class MetadataServiceClient : IAsyncDisposable
+public class MetadataServiceClient : IMetadataServiceClient
 {
     private readonly string _host;
     private readonly int _port;

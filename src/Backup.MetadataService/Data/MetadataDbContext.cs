@@ -75,6 +75,7 @@ public class MetadataDbContext : DbContext
         {
             b.ToTable("file_versions");
             b.HasKey(fv => fv.Id);
+            b.Property(fv => fv.OperationId).IsRequired();
             b.Property(fv => fv.VersionNumber).IsRequired();
             b.Property(fv => fv.Size).IsRequired();
             b.Property(fv => fv.Sha256).IsRequired().HasMaxLength(64);
@@ -91,6 +92,10 @@ public class MetadataDbContext : DbContext
                 .IsUnique();
 
             b.HasIndex(fv => fv.FileId);
+
+            // UNIQUE (OperationId)
+            b.HasIndex(fv => fv.OperationId)
+                .IsUnique();
         });
 
         // ChangeLogEntity

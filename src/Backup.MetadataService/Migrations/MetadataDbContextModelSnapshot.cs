@@ -178,6 +178,9 @@ namespace Backup.MetadataService.Migrations
                     b.Property<Guid>("FileId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Sha256")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -196,6 +199,9 @@ namespace Backup.MetadataService.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("FileId");
+
+                    b.HasIndex("OperationId")
+                        .IsUnique();
 
                     b.HasIndex("FileId", "VersionNumber")
                         .IsUnique();

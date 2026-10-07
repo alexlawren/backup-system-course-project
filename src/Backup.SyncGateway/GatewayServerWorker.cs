@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Sockets;
 using Backup.Shared.Messages;
 using Backup.Shared.Protocol;
+using Backup.SyncGateway.Clients;
 using Backup.SyncGateway.Configuration;
+using Backup.SyncGateway.Orchestration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -12,19 +14,24 @@ namespace Backup.SyncGateway;
 public class GatewayServerWorker : BackgroundService
 {
     private readonly ILogger<GatewayServerWorker> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly GatewayOptions _gatewayOptions;
     private readonly DownstreamServicesOptions _downstreamOptions;
     private TcpListener? _listener;
 
     public GatewayServerWorker(
         ILogger<GatewayServerWorker> logger,
+        ILoggerFactory loggerFactory,
         IOptions<GatewayOptions> gatewayOptions,
         IOptions<DownstreamServicesOptions> downstreamOptions)
     {
         _logger = logger;
+        _loggerFactory = loggerFactory;
         _gatewayOptions = gatewayOptions.Value;
         _downstreamOptions = downstreamOptions.Value;
     }
+
+    public int? BoundPort => (_listener?.LocalEndpoint as IPEndPoint)?.Port;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -37,7 +44,8 @@ public class GatewayServerWorker : BackgroundService
         _listener = new TcpListener(ip, _gatewayOptions.Port);
         _listener.Start();
 
-        _logger.LogInformation("[SyncGateway] Listening on {Host}:{Port}", _gatewayOptions.Host, _gatewayOptions.Port);
+        var boundPort = BoundPort ?? _gatewayOptions.Port;
+        _logger.LogInformation("[SyncGateway] Listening on {Host}:{Port}", _gatewayOptions.Host, boundPort);
 
         try
         {
@@ -80,7 +88,7 @@ public class GatewayServerWorker : BackgroundService
             var helloHeader = await writer.WriteJsonFrameAsync(
                 stream,
                 MessageType.Hello,
-                new HelloRequest { ClientName = "Backup.SyncGateway", Version = "1.0" },
+                new HelloRequest { ClientName = "Backup.SyncGateway", Version = "1.0", Role = "SyncGateway" },
                 cancellationToken: cts.Token);
 
             var respHeader = await reader.ReadHeaderAsync(stream, cts.Token);
@@ -113,57 +121,21 @@ public class GatewayServerWorker : BackgroundService
             using (client)
             await using (var stream = client.GetStream())
             {
-                var reader = new ProtocolFrameReader();
-                var writer = new ProtocolFrameWriter();
+                var metadataClient = new MetadataServiceClient(
+                    _downstreamOptions.MetadataService.Host,
+                    _downstreamOptions.MetadataService.Port);
 
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    var header = await reader.ReadHeaderAsync(stream, cancellationToken);
-                    if (header == null)
-                    {
-                        break; // Normal client disconnect
-                    }
+                var storageClient = new StorageServiceClient(
+                    _downstreamOptions.StorageService.Host,
+                    _downstreamOptions.StorageService.Port);
 
-                    switch (header.MessageType)
-                    {
-                        case MessageType.Hello:
-                            var helloReq = await reader.ReadJsonBodyAsync<HelloRequest>(stream, header.BodyLength, cancellationToken);
-                            _logger.LogInformation("[SyncGateway] Received Hello from '{ClientName}'", helloReq?.ClientName ?? "Unknown");
+                var sessionLogger = _loggerFactory.CreateLogger<GatewaySessionHandler>();
+                await using var sessionHandler = new GatewaySessionHandler(
+                    metadataClient,
+                    storageClient,
+                    sessionLogger);
 
-                            var helloAck = new HelloResponse
-                            {
-                                ServerName = "Backup.SyncGateway",
-                                Version = "1.0",
-                                Success = true,
-                                Message = "SyncGateway is ready."
-                            };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.HelloAck, helloAck, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-
-                        case MessageType.Ping:
-                            var pingMsg = await reader.ReadJsonBodyAsync<PingMessage>(stream, header.BodyLength, cancellationToken);
-                            _logger.LogInformation("[SyncGateway] Received Ping (MsgId: {MessageId})", header.MessageId);
-
-                            var pongMsg = new PingMessage { Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.Pong, pongMsg, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-
-                        default:
-                            _logger.LogWarning("[SyncGateway] Unhandled MessageType: {MessageType}", header.MessageType);
-                            if (header.BodyLength > 0)
-                            {
-                                await reader.ReadBodyBytesAsync(stream, header.BodyLength, cancellationToken);
-                            }
-
-                            var errorMsg = new ErrorMessage
-                            {
-                                Code = "NOT_IMPLEMENTED",
-                                Message = $"MessageType '{header.MessageType}' is not handled in Change-set #1."
-                            };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.Error, errorMsg, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-                    }
-                }
+                await sessionHandler.ProcessConnectionAsync(stream, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

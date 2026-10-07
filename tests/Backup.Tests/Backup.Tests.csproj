@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\Backup.MetadataService\Backup.MetadataService.csproj" />
     <ProjectReference Include="..\..\src\Backup.SyncGateway\Backup.SyncGateway.csproj" />
     <ProjectReference Include="..\..\src\Backup.StorageService\Backup.StorageService.csproj" />
+    <ProjectReference Include="..\..\src\Backup.Client.Web\Backup.Client.Web.csproj" />
   </ItemGroup>
 
 </Project>

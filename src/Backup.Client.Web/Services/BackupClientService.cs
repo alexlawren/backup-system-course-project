@@ -1,0 +1,174 @@
+using Backup.Shared.Errors;
+using Backup.Shared.Messages;
+using Backup.Shared.Validation;
+
+namespace Backup.Client.Web.Services;
+
+public interface IBackupClientService
+{
+    Task<ClientState> GetIdentityAsync(CancellationToken cancellationToken = default);
+    Task<bool> EnsureRegisteredAsync(CancellationToken cancellationToken = default);
+    Task<CreateBackupSetResponse> CreateBackupSetAsync(string name, string localRootPath, CancellationToken cancellationToken = default);
+    Task<UploadCompletedResponse> BackupSingleFileAsync(Guid backupSetId, string localRootPath, string absoluteFilePath, CancellationToken cancellationToken = default);
+    Task<bool> PingGatewayAsync(CancellationToken cancellationToken = default);
+}
+
+public class BackupClientService : IBackupClientService
+{
+    private readonly BackupGatewayClient _gatewayClient;
+    private readonly IClientIdentityService _identityService;
+
+    public BackupClientService(
+        BackupGatewayClient gatewayClient,
+        IClientIdentityService identityService)
+    {
+        _gatewayClient = gatewayClient;
+        _identityService = identityService;
+    }
+
+    public async Task<ClientState> GetIdentityAsync(CancellationToken cancellationToken = default)
+    {
+        return await _identityService.GetStateAsync(cancellationToken);
+    }
+
+    public async Task<bool> PingGatewayAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var state = await _identityService.GetStateAsync(cancellationToken);
+            var hello = await _gatewayClient.HelloAsync("Backup.Client.Web", state.ClientId, cancellationToken);
+            return hello != null && hello.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<bool> EnsureRegisteredAsync(CancellationToken cancellationToken = default)
+    {
+        var state = await _identityService.GetStateAsync(cancellationToken);
+
+        var regRequest = new RegisterClientRequest
+        {
+            ClientId = state.ClientId,
+            Name = state.ClientName,
+            MachineName = state.MachineName
+        };
+
+        var response = await _gatewayClient.RegisterClientAsync(regRequest, cancellationToken);
+        if (response.Success && response.ClientId != Guid.Empty)
+        {
+            await _identityService.SaveStateAsync(response.ClientId, state.MachineName, state.ClientName, cancellationToken);
+            return true;
+        }
+
+        return false;
+    }
+
+    public async Task<CreateBackupSetResponse> CreateBackupSetAsync(
+        string name,
+        string localRootPath,
+        CancellationToken cancellationToken = default)
+    {
+        var state = await _identityService.GetStateAsync(cancellationToken);
+        if (state.ClientId == null)
+        {
+            bool registered = await EnsureRegisteredAsync(cancellationToken);
+            if (!registered)
+            {
+                return new CreateBackupSetResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Client must be registered before creating a backup set."
+                };
+            }
+            state = await _identityService.GetStateAsync(cancellationToken);
+        }
+
+        var request = new CreateBackupSetRequest
+        {
+            ClientId = state.ClientId!.Value,
+            Name = name,
+            LocalRootPath = localRootPath
+        };
+
+        return await _gatewayClient.CreateBackupSetAsync(request, cancellationToken);
+    }
+
+    public async Task<UploadCompletedResponse> BackupSingleFileAsync(
+        Guid backupSetId,
+        string localRootPath,
+        string absoluteFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        if (backupSetId == Guid.Empty)
+        {
+            return new UploadCompletedResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.BackupSetNotFound,
+                ErrorMessage = "BackupSetId cannot be empty."
+            };
+        }
+
+        if (string.IsNullOrWhiteSpace(localRootPath) || !Directory.Exists(localRootPath))
+        {
+            return new UploadCompletedResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.InvalidLocalFile,
+                ErrorMessage = $"LocalRootPath '{localRootPath}' does not exist on this machine."
+            };
+        }
+
+        if (string.IsNullOrWhiteSpace(absoluteFilePath) || !File.Exists(absoluteFilePath))
+        {
+            return new UploadCompletedResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.InvalidLocalFile,
+                ErrorMessage = $"File '{absoluteFilePath}' not found on local disk."
+            };
+        }
+
+        // Verify containment inside LocalRootPath
+        string fullRoot = Path.GetFullPath(localRootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string fullFile = Path.GetFullPath(absoluteFilePath);
+
+        if (!fullFile.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return new UploadCompletedResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.InvalidLocalFile,
+                ErrorMessage = $"File '{absoluteFilePath}' is outside the BackupSet root directory '{localRootPath}'."
+            };
+        }
+
+        string relative = Path.GetRelativePath(localRootPath, absoluteFilePath);
+        if (!ProtocolPathValidator.TryNormalizeAndValidate(relative, out var normalizedRelative, out var pathError))
+        {
+            return new UploadCompletedResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.InvalidRelativePath,
+                ErrorMessage = $"Path validation failed: {pathError}"
+            };
+        }
+
+        var state = await _identityService.GetStateAsync(cancellationToken);
+        if (state.ClientId == null)
+        {
+            await EnsureRegisteredAsync(cancellationToken);
+            state = await _identityService.GetStateAsync(cancellationToken);
+        }
+
+        return await _gatewayClient.BackupFileAsync(
+            backupSetId,
+            normalizedRelative,
+            absoluteFilePath,
+            state.ClientId,
+            cancellationToken);
+    }
+}
