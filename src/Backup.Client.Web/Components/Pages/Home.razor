@@ -1,0 +1,75 @@
+@page "/"
+@rendermode InteractiveServer
+
+<PageTitle>Backup System - Course Project</PageTitle>
+
+<div class="system-container">
+    <header class="system-header">
+        <div class="badge-tag">Change-set #1</div>
+        <h1>Backup System</h1>
+        <p class="subtitle">Course Project — «Программирование сетевых приложений»</p>
+    </header>
+
+    <section class="card-section">
+        <h2>Architecture status:</h2>
+        <div class="status-grid">
+            <div class="status-card active">
+                <div class="status-indicator online"></div>
+                <div class="status-info">
+                    <span class="status-name">Client Web</span>
+                    <span class="status-role">Local Web UI (http://localhost:5100)</span>
+                    <span class="status-badge badge-green">Running</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <div class="status-indicator pending"></div>
+                <div class="status-info">
+                    <span class="status-name">Sync Gateway</span>
+                    <span class="status-role">TCP Entry Point (127.0.0.1:5000)</span>
+                    <span class="status-badge badge-amber">Not connected / placeholder</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <div class="status-indicator placeholder"></div>
+                <div class="status-info">
+                    <span class="status-name">Metadata Service</span>
+                    <span class="status-role">TCP 127.0.0.1:5001 (PostgreSQL placeholder)</span>
+                    <span class="status-badge badge-gray">Downstream placeholder</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <div class="status-indicator placeholder"></div>
+                <div class="status-info">
+                    <span class="status-name">Storage Service</span>
+                    <span class="status-role">TCP 127.0.0.1:5002 (File Storage placeholder)</span>
+                    <span class="status-badge badge-gray">Downstream placeholder</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="card-section protocol-overview">
+        <h2>TCP Protocol v1 Specifications</h2>
+        <div class="protocol-grid">
+            <div class="protocol-item">
+                <span class="label">Magic Marker</span>
+                <span class="val">BKP1</span>
+            </div>
+            <div class="protocol-item">
+                <span class="label">Protocol Version</span>
+                <span class="val">1</span>
+            </div>
+            <div class="protocol-item">
+                <span class="label">Framing Structure</span>
+                <span class="val">[4B HeaderLen BigEndian] [JSON Header ≤ 64 KiB] [BodyStream]</span>
+            </div>
+            <div class="protocol-item">
+                <span class="label">Transport Layer</span>
+                <span class="val">Raw TCP Sockets (Async I/O + Streaming)</span>
+            </div>
+        </div>
+    </section>
+</div>
