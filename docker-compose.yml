@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: backup_system_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-backup_system}
+      POSTGRES_USER: ${POSTGRES_USER:-backup_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-backup_app_dev_secret_2026}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backup_app} -d ${POSTGRES_DB:-backup_system}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    name: backup_system_postgres_data

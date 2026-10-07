@@ -8,6 +8,12 @@ public enum MessageType
     Pong,
     Error,
 
+    // Client & BackupSet registration
+    RegisterClient,
+    RegisterClientResult,
+    CreateBackupSet,
+    CreateBackupSetResult,
+
     Manifest,
     SyncPlan,
 
@@ -36,7 +42,9 @@ public enum MessageType
     CommitVersionResult,
 
     DeleteFileMetadata,
+    DeleteFileMetadataResult,
     RenameFileMetadata,
+    RenameFileMetadataResult,
 
     ResolveVersion,
     ResolveVersionResult,

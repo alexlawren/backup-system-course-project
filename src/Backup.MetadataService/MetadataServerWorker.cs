@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using Backup.MetadataService.Configuration;
-using Backup.Shared.Messages;
+using Backup.MetadataService.Services;
 using Backup.Shared.Protocol;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,14 +13,20 @@ public class MetadataServerWorker : BackgroundService
 {
     private readonly ILogger<MetadataServerWorker> _logger;
     private readonly MetadataServiceOptions _options;
+    private readonly MetadataMessageDispatcher _dispatcher;
+    private readonly ProtocolFrameReader _reader;
     private TcpListener? _listener;
 
     public MetadataServerWorker(
         ILogger<MetadataServerWorker> logger,
-        IOptions<MetadataServiceOptions> options)
+        IOptions<MetadataServiceOptions> options,
+        MetadataMessageDispatcher dispatcher,
+        ProtocolFrameReader reader)
     {
         _logger = logger;
         _options = options.Value;
+        _dispatcher = dispatcher;
+        _reader = reader;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -65,56 +71,15 @@ public class MetadataServerWorker : BackgroundService
             using (client)
             await using (var stream = client.GetStream())
             {
-                var reader = new ProtocolFrameReader();
-                var writer = new ProtocolFrameWriter();
-
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    var header = await reader.ReadHeaderAsync(stream, cancellationToken);
+                    var header = await _reader.ReadHeaderAsync(stream, cancellationToken);
                     if (header == null)
                     {
-                        break; // Normal client disconnect
+                        break; // Normal peer disconnect
                     }
 
-                    switch (header.MessageType)
-                    {
-                        case MessageType.Hello:
-                            var helloReq = await reader.ReadJsonBodyAsync<HelloRequest>(stream, header.BodyLength, cancellationToken);
-                            _logger.LogInformation("[MetadataService] Received Hello from '{ClientName}'", helloReq?.ClientName ?? "Unknown");
-
-                            var helloAck = new HelloResponse
-                            {
-                                ServerName = "Backup.MetadataService",
-                                Version = "1.0",
-                                Success = true,
-                                Message = "MetadataService is ready."
-                            };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.HelloAck, helloAck, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-
-                        case MessageType.Ping:
-                            var pingMsg = await reader.ReadJsonBodyAsync<PingMessage>(stream, header.BodyLength, cancellationToken);
-                            _logger.LogInformation("[MetadataService] Received Ping (MsgId: {MessageId})", header.MessageId);
-
-                            var pongMsg = new PingMessage { Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.Pong, pongMsg, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-
-                        default:
-                            _logger.LogWarning("[MetadataService] Unhandled MessageType: {MessageType}", header.MessageType);
-                            if (header.BodyLength > 0)
-                            {
-                                await reader.ReadBodyBytesAsync(stream, header.BodyLength, cancellationToken);
-                            }
-
-                            var errorMsg = new ErrorMessage
-                            {
-                                Code = "NOT_IMPLEMENTED",
-                                Message = $"MessageType '{header.MessageType}' is not handled in Change-set #1."
-                            };
-                            await writer.WriteJsonFrameAsync(stream, MessageType.Error, errorMsg, correlationId: header.MessageId, cancellationToken: cancellationToken);
-                            break;
-                    }
+                    await _dispatcher.DispatchAsync(header, stream, cancellationToken);
                 }
             }
         }

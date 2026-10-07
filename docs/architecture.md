@@ -1,10 +1,10 @@
-# Архитектура системы резервного копирования (Change-set #1)
+# Архитектура системы резервного копирования
 
-## 1. Общий обзор системы
+## 1. Общий обзор системы (Change-set #2: PostgreSQL + Metadata Service)
 
 Курсовой проект по дисциплине «Программирование сетевых приложений» посвящен разработке распределенной клиент-серверной системы резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений.
 
-Вся межсервисная сетевая коммуникация между клиентом и серверными компонентами строится на базе **собственного бинарного TCP-протокола (Protocol v1)**, использующего асинхронный ввод-вывод (`System.Net.Sockets`) и потоковую обработку данных (streaming).
+Вся межсервисная сетевая коммуникация между клиентом и серверными компонентами строится на базе **собственного бинарного TCP-протокола (Protocol v1)**, использующего асинхронный ввод-вывод (`System.Net.Sockets`) и потоковую передачу данных (streaming).
 
 ```
 Browser (Пользователь)
@@ -18,7 +18,10 @@ Backup.Client.Web (Локальный UI клиента)
 Backup.SyncGateway (Шлюз синхронизации и оркестратор)
     |
     +---- TCP (127.0.0.1:5001) [Protocol v1] ----> Backup.MetadataService
-    |                                                (в будущем -> PostgreSQL)
+    |                                                |
+    |                                                | EF Core / Npgsql
+    |                                                v
+    |                                              PostgreSQL (backup_system)
     |
     +---- TCP (127.0.0.1:5002) [Protocol v1] ----> Backup.StorageService
                                                      (в будущем -> Файловое хранилище)
@@ -26,56 +29,120 @@ Backup.SyncGateway (Шлюз синхронизации и оркестрато�
 
 ---
 
-## 2. Назначение проектов Solution
+## 2. Архитектурная изоляция базы данных
 
-Solution состоит из следующих проектов:
-
-### 1. `Backup.Client.Web`
-- **Тип:** ASP.NET Core Blazor Web App (Interactive Server).
-- **Порт:** `http://localhost:5100`.
-- **Назначение:** Локальный веб-интерфейс для пользователя на клиентской машине. В Change-set #1 отображает статус доступности архитектурных узлов системы. На следующих этапах будет координировать фоновый `FileSystemWatcher` и локальный движок синхронизации `SyncEngine`.
-
-### 2. `Backup.SyncGateway`
-- **Тип:** Автономный фоновый сервис (`BackgroundService` / Generic Host).
-- **Сетевой интерфейс:** TCP Listener на `127.0.0.1:5000`.
-- **Назначение:** Единая точка входа для клиентских подключений и **оркестратор** операций резервного копирования.
-  - Принимает запросы клиента по Protocol v1;
-  - Оркестрирует распределенные операции: транзакции метаданных направляет в `MetadataService`, а потоки физических файлов — в `StorageService`;
-  - На этапе Change-set #1 при старте проводит smoke-проверку доступности downstream-сервисов (`MetadataService` и `StorageService`).
-
-### 3. `Backup.MetadataService`
-- **Тип:** Автономный фоновый сервис (`BackgroundService` / Generic Host).
-- **Сетевой интерфейс:** TCP Listener на `127.0.0.1:5001`.
-- **Назначение:** Сервис управления структурой файлов, версиями и журналом изменений.
-  - В будущем инкапсулирует работу с реляционной СУБД **PostgreSQL** (манифесты, сессии синхронизации, журнал ревизий, детекция конфликтов).
-  - На этапе Change-set #1 обрабатывает рукопожатие (`Hello`/`HelloAck`) и проверку активности (`Ping`/`Pong`).
-
-### 4. `Backup.StorageService`
-- **Тип:** Автономный фоновый сервис (`BackgroundService` / Generic Host).
-- **Сетевой интерфейс:** TCP Listener на `127.0.0.1:5002`.
-- **Назначение:** Сервис физического хранения файлов резервных копий.
-  - В будущем отвечает за сохранение блоков и версий файлов в файловой системе хранилища, дедупликацию и отдачу контента при восстановлении.
-  - На этапе Change-set #1 обрабатывает рукопожатие (`Hello`/`HelloAck`) и `Ping`/`Pong`.
-
-### 5. `Backup.Shared`
-- **Тип:** Библиотека классов (.NET Class Library).
-- **Назначение:** Содержит общие сетевые контракты Protocol v1:
-  - Структура кадра (framing);
-  - Формат заголовка (`ProtocolHeader`);
-  - Перечисление типов сообщений (`MessageType`);
-  - Низкоуровневые потоковые ридеры и райтеры (`ProtocolFrameReader`, `ProtocolFrameWriter`);
-  - Контракты базовых управляющих сообщений (`HelloRequest`, `HelloResponse`, `PingMessage`, `ErrorMessage`).
-  - **Важно:** библиотека строго изолирована от бизнес-логики и внешних тяжелых зависимостей.
-
-### 6. `Backup.Tests`
-- **Тип:** xUnit тестовый проект.
-- **Назначение:** Комплексное модульное тестирование Protocol v1: валидация фрейминга, лимиты, устойчивость к фрагментации TCP-потока, целостность передачи бинарных данных.
+> [!IMPORTANT]
+> **PostgreSQL принадлежит ТОЛЬКО `Backup.MetadataService`**.
+> Проекты `Backup.Client.Web`, `Backup.SyncGateway` и `Backup.StorageService` не имеют и не должны иметь прямого доступа к базе данных или строкам подключения к ней. Вся работа с метаданными осуществляется исключительно через сетевые вызовы TCP Protocol v1.
 
 ---
 
-## 3. Принципы сетевого взаимодействия
+## 3. Схема базы данных и сущности (MetadataService)
 
-1. **Изолированные процессы:** Все сервисы запускаются как независимые процессы операционной системы со своими конфигурационными файлами (`appsettings.json`).
-2. **Собственный TCP-протокол:** Вместо накладных расходов REST/gRPC реализован чистый бинарно-фреймированный протокол поверх сырых сокетов.
-3. **Потоковая передача данных (Streaming):** Архитектура ридера и райтера не требует загрузки всего содержимого передаваемых файлов в оперативную память (`byte[]`), передавая данные чанками фиксированного размера (64 KiB) напрямую между сокетом и целевым потоком.
-4. **Неблокирующий асинхронный I/O:** Полное использование паттерна `async/await` и сквозная передача токенов отмены `CancellationToken`.
+База данных построена с использованием **Entity Framework Core 9** и провайдера **Npgsql**.
+
+### Реляционные сущности:
+
+1. **`clients` (`ClientEntity`)**:
+   - `Id` (PK, Guid): уникальный идентификатор зарегистрированного клиента;
+   - `Name` (varchar 255): отображаемое имя рабочей станции;
+   - `MachineName` (varchar 255): сетевое имя хоста;
+   - `CreatedAtUtc` (timestamptz): время первичной регистрации;
+   - `LastSeenAtUtc` (timestamptz): время последней активности клиента.
+
+2. **`backup_sets` (`BackupSetEntity`)**:
+   - `Id` (PK, Guid): идентификатор набора резервного копирования;
+   - `ClientId` (FK -> `clients`, Guid): владелец набора (Cascade Delete);
+   - `Name` (varchar 255): название набора (например, "Рабочие документы");
+   - `LocalRootPath` (varchar 1024): локальный корневой путь на клиенте;
+   - `CreatedAtUtc` (timestamptz): дата создания;
+   - `IsActive` (bool): признак активности набора.
+   - *Индексы:* `ClientId`.
+
+3. **`files` (`FileEntity`)**:
+   - `Id` (PK, Guid): идентификатор логического файла;
+   - `BackupSetId` (FK -> `backup_sets`, Guid): родительский набор (Cascade Delete);
+   - `RelativePath` (varchar 2048): нормализованный относительный путь (разделитель `/`);
+   - `CurrentVersionNumber` (int, default 0): номер актуальной зафиксированной версии;
+   - `IsDeleted` (bool, default false): признак логического удаления;
+   - `CreatedAtUtc` (timestamptz);
+   - `UpdatedAtUtc` (timestamptz).
+   - *Ограничения:* `UNIQUE (BackupSetId, RelativePath)`.
+
+4. **`file_versions` (`FileVersionEntity`)**:
+   - `Id` (PK, Guid): идентификатор версии;
+   - `FileId` (FK -> `files`, Guid): родительский файл (Cascade Delete);
+   - `VersionNumber` (int): порядковый номер ревизии файла (1, 2, ...);
+   - `Size` (bigint): точный размер файла в байтах;
+   - `Sha256` (varchar 64): контрольная сумма содержимого;
+   - `StorageKey` (varchar 1024, nullable): уникальный ключ файла в хранилище (заполняется при Commit);
+   - `CreatedAtUtc` (timestamptz).
+   - *Ограничения:* `UNIQUE (FileId, VersionNumber)`, индекс на `FileId`.
+
+5. **`change_logs` (`ChangeLogEntity`)**:
+   - `Id` (PK, Guid): запись аудита;
+   - `ClientId` (FK -> `clients`);
+   - `BackupSetId` (FK -> `backup_sets`);
+   - `FileId` (nullable FK -> `files`, SetNull);
+   - `Action` (varchar 64): тип действия (`CREATE`, `MODIFY`, `DELETE`, `RENAME`);
+   - `Status` (varchar 64): статус фиксации (`COMMITTED`);
+   - `Details` (varchar 2048, nullable): текстовое описание события;
+   - `CreatedAtUtc` (timestamptz).
+   - *Индексы:* `CreatedAtUtc`.
+
+6. **`pending_file_operations` (`PendingFileOperationEntity`)**:
+   - `OperationId` (PK, Guid): уникальный идентификатор незавершенной операции;
+   - `FileId` (FK -> `files`, Cascade Delete);
+   - `ExpectedVersionNumber` (int): ожидаемый номер следующей версии;
+   - `ExpectedSize` (bigint): заявленный размер загрузки;
+   - `ExpectedSha256` (varchar 64): ожидаемый хэш содержимого;
+   - `CreatedAtUtc` (timestamptz);
+   - `ExpiresAtUtc` (timestamptz): срок действия операции (по умолчанию +30 минут).
+   - *Индексы:* `ExpiresAtUtc`.
+
+---
+
+## 4. Жизненный цикл версионирования (Prepare -> Commit)
+
+Для предотвращения несогласованности данных и защиты от частичных загрузок операция создания новой версии разбита на две фазы:
+
+```
+[Клиент / Gateway]                                      [MetadataService]                      [PostgreSQL]
+        |                                                       |                                   |
+        |--- 1. PrepareVersionRequest (Path, Size, Sha256) ---->|                                   |
+        |                                                       |-- Поиск файла по RelativePath --->|
+        |                                                       |   (если нет, создает File v0)     |
+        |                                                       |-- Проверка committed Sha256 ----->|
+        |                                                       |   (если совпал: UploadReq=false)  |
+        |                                                       |-- Создание PendingOperation ----->|
+        |<-- 2. PrepareVersionResponse (OpId, ExpVersion) ------|                                   |
+        |                                                       |                                   |
+   [Фаза передачи данных в StorageService на Change-set #3]     |                                   |
+        |                                                       |                                   |
+        |--- 3. CommitVersionRequest (OpId, Key, Size, Hash) -->|                                   |
+        |                                                       |== BEGIN TRANSACTION =============>|
+        |                                                       |-- Валидация PendingOperation ---->|
+        |                                                       |-- Создание FileVersion ---------->|
+        |                                                       |-- Обновление File.CurrentVersion->|
+        |                                                       |-- Запись в ChangeLog ------------>|
+        |                                                       |-- Удаление PendingOperation ----->|
+        |                                                       |== COMMIT TRANSACTION ============>|
+        |<-- 4. CommitVersionResponse (FileId, Version) --------|                                   |
+```
+
+### Важнейшие инварианты:
+- **`PrepareVersion` НЕ создает `FileVersion`** и не увеличивает `CurrentVersionNumber`.
+- **`CommitVersion` выполняется в единой ACID-транзакции**. В случае несовпадения хэша/размера или повторного вызова транзакция откатывается (`Rollback`), дублирующие версии не создаются.
+- **Удаление (`DeleteFileMetadata`)** является логическим (`IsDeleted = true`), исторические версии в `file_versions` сохраняются.
+- **Переименование (`RenameFileMetadata`)** меняет логический путь в `files`, сохраняя всю историю ревизий без физического перемещения блоков.
+
+---
+
+## 5. Внутренняя архитектура MetadataService
+
+Сервис организован по уровням ответственности:
+
+1. **`MetadataServerWorker`**: сетевой уровень. Принимает TCP-клиентов, поддерживает сессии и потоковое чтение кадров.
+2. **`MetadataMessageDispatcher`**: протокольный диспетчер. Маршрутизирует `MessageType` в строго типизированные вызовы сервиса приложения и формирует ответы с корректными `MessageId` и `CorrelationId`.
+3. **`MetadataApplicationService`**: слой бизнес-логики. Валидирует входящие параметры и пути (`ProtocolPathValidator`), управляет транзакциями и сущностями.
+4. **`IDbContextFactory<MetadataDbContext>`**: потокобезопасная фабрика контекстов EF Core. Каждый запрос создает изолированный экземпляр контекста через `await using var dbContext = await _dbContextFactory.CreateDbContextAsync()`.
