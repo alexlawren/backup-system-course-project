@@ -16,6 +16,7 @@ public class SyncLogEntry
 public interface ISyncEngine : IAsyncDisposable, IDisposable
 {
     bool IsRunning { get; }
+    bool IsReconciling { get; }
     string? CurrentLocalRootPath { get; }
     Guid? CurrentBackupSetId { get; }
     string? CurrentBackupSetName { get; }
@@ -65,6 +66,7 @@ public class SyncEngine : ISyncEngine
     private int _debounceDelayMs = 750;
 
     public bool IsRunning { get; private set; }
+    public bool IsReconciling { get; private set; }
     public string? CurrentLocalRootPath => _activeProfile?.LocalRootPath;
     public Guid? CurrentBackupSetId => _activeProfile?.BackupSetId;
     public string? CurrentBackupSetName => _activeProfile?.Name;
@@ -113,8 +115,14 @@ public class SyncEngine : ISyncEngine
         _logger = logger;
         _debounceDelayMs = debounceDelayMs;
         _suppressionService = suppressionService ?? new RestoreSuppressionService();
-
         _watcherService.OverflowOrErrorOccurred += OnWatcherOverflowOrError;
+        _gatewayClient.Reconnected += OnGatewayReconnected;
+    }
+
+    private void OnGatewayReconnected()
+    {
+        Log("[SyncEngine] Gateway connection re-established. Full reconciliation required.", "WARN");
+        ReconciliationRequired = true;
     }
 
     private void Log(string message, string level = "INFO")
@@ -192,6 +200,9 @@ public class SyncEngine : ISyncEngine
 
                 await _identityService.SaveStateAsync(reg.ClientId, identity.MachineName, identity.ClientName, cancellationToken);
             }
+
+            var activeIdentity = await _identityService.GetStateAsync(cancellationToken);
+            _gatewayClient.SetActiveClientId(activeIdentity.ClientId);
 
             Log($"[SyncEngine] Starting automatic synchronization for '{profile.Name}' ({profile.LocalRootPath})");
 
@@ -300,6 +311,7 @@ public class SyncEngine : ISyncEngine
 
         Log($"[SyncEngine] Initial reconciliation started for BackupSet {backupSetId}");
 
+        IsReconciling = true;
         try
         {
             // 1. Load local index cache
@@ -447,6 +459,10 @@ public class SyncEngine : ISyncEngine
             ReconciliationRequired = true;
             LastSyncResult = $"Reconciliation error: {ex.Message}";
             Log($"[SyncEngine] Reconciliation error: {ex.Message}", "ERROR");
+        }
+        finally
+        {
+            IsReconciling = false;
         }
     }
 
@@ -1146,6 +1162,8 @@ public class SyncEngine : ISyncEngine
     public void Dispose()
     {
         _watcherService.OverflowOrErrorOccurred -= OnWatcherOverflowOrError;
+        _gatewayClient.Reconnected -= OnGatewayReconnected;
+        _watcherService.Stop();
         _loopCts?.Cancel();
         _loopCts?.Dispose();
         _syncLock.Dispose();
@@ -1154,6 +1172,8 @@ public class SyncEngine : ISyncEngine
     public async ValueTask DisposeAsync()
     {
         _watcherService.OverflowOrErrorOccurred -= OnWatcherOverflowOrError;
+        _gatewayClient.Reconnected -= OnGatewayReconnected;
+        _watcherService.Stop();
         if (_loopCts != null)
         {
             _loopCts.Cancel();
@@ -1163,7 +1183,10 @@ public class SyncEngine : ISyncEngine
                 {
                     await _processingLoopTask.WaitAsync(TimeSpan.FromSeconds(3));
                 }
-                catch { }
+                catch (Exception)
+                {
+                    // Ignore cancellation or shutdown timeout
+                }
             }
             _loopCts.Dispose();
             _loopCts = null;

@@ -24,12 +24,22 @@ public class MetadataServiceClient : IMetadataServiceClient
         _writer = new ProtocolFrameWriter();
     }
 
+    public void Disconnect()
+    {
+        try { _stream?.Dispose(); } catch { }
+        _stream = null;
+        try { _tcpClient?.Dispose(); } catch { }
+        _tcpClient = null;
+    }
+
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
-        if (_tcpClient != null && _tcpClient.Connected)
+        if (_tcpClient != null && _tcpClient.Connected && _stream != null)
         {
             return;
         }
+
+        Disconnect();
 
         _tcpClient = new TcpClient();
         await _tcpClient.ConnectAsync(_host, _port, cancellationToken);
@@ -38,15 +48,24 @@ public class MetadataServiceClient : IMetadataServiceClient
 
     public async Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default)
     {
-        await EnsureConnectedAsync(cancellationToken);
-        var req = new HelloRequest { ClientName = clientName, Version = "1.0" };
-        var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.Hello, req, cancellationToken: cancellationToken);
-        var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-        if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
+        try
         {
-            return null;
+            await EnsureConnectedAsync(cancellationToken);
+            var req = new HelloRequest { ClientName = clientName, Version = "1.0" };
+            var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.Hello, req, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
+            {
+                Disconnect();
+                return null;
+            }
+            return await _reader.ReadJsonBodyAsync<HelloResponse>(_stream!, respHeader.BodyLength, cancellationToken);
         }
-        return await _reader.ReadJsonBodyAsync<HelloResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+        catch
+        {
+            Disconnect();
+            throw;
+        }
     }
 
     public async Task<RegisterClientResponse> RegisterClientAsync(RegisterClientRequest request, CancellationToken cancellationToken = default)
@@ -145,29 +164,39 @@ public class MetadataServiceClient : IMetadataServiceClient
         TRequest request,
         CancellationToken cancellationToken) where TResponse : class, new()
     {
-        await EnsureConnectedAsync(cancellationToken);
-
-        var reqHeader = await _writer.WriteJsonFrameAsync(_stream!, requestType, request, cancellationToken: cancellationToken);
-        var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-
-        if (respHeader == null)
+        try
         {
-            throw new ProtocolException("Remote host closed TCP stream unexpectedly.");
-        }
+            await EnsureConnectedAsync(cancellationToken);
 
-        if (respHeader.MessageType == MessageType.Error)
+            var reqHeader = await _writer.WriteJsonFrameAsync(_stream!, requestType, request, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+            if (respHeader == null)
+            {
+                Disconnect();
+                throw new ProtocolException("Remote host closed TCP stream unexpectedly.");
+            }
+
+            if (respHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+                throw new ProtocolException($"MetadataService returned Error [{err?.Code}]: {err?.Message}");
+            }
+
+            if (respHeader.MessageType != expectedResponseType)
+            {
+                Disconnect();
+                throw new ProtocolException($"Unexpected response MessageType. Expected '{expectedResponseType}', received '{respHeader.MessageType}'.");
+            }
+
+            var response = await _reader.ReadJsonBodyAsync<TResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+            return response ?? new TResponse();
+        }
+        catch
         {
-            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
-            throw new ProtocolException($"MetadataService returned Error [{err?.Code}]: {err?.Message}");
+            Disconnect();
+            throw;
         }
-
-        if (respHeader.MessageType != expectedResponseType)
-        {
-            throw new ProtocolException($"Unexpected response MessageType. Expected '{expectedResponseType}', received '{respHeader.MessageType}'.");
-        }
-
-        var response = await _reader.ReadJsonBodyAsync<TResponse>(_stream!, respHeader.BodyLength, cancellationToken);
-        return response ?? new TResponse();
     }
 
     private async Task EnsureConnectedAsync(CancellationToken cancellationToken)

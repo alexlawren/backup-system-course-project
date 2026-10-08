@@ -386,4 +386,48 @@ public class FileStorageService : IFileStorageService
 
         return Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), configuredPath));
     }
+
+    /// <summary>
+    /// Scans ONLY the temporary upload directory (_tempPath / .tmp) for *.part files older than maxAge.
+    /// Never touches or scans committed immutable files in clients/.../versions/.
+    /// </summary>
+    public int CleanupExpiredTempFiles(TimeSpan maxAge)
+    {
+        if (!Directory.Exists(_tempPath))
+        {
+            return 0;
+        }
+
+        int deletedCount = 0;
+        var threshold = DateTime.UtcNow - maxAge;
+
+        try
+        {
+            var tempFiles = Directory.EnumerateFiles(_tempPath, "*.part", SearchOption.TopDirectoryOnly);
+            foreach (var filePath in tempFiles)
+            {
+                try
+                {
+                    var fileInfo = new FileInfo(filePath);
+                    if (fileInfo.LastWriteTimeUtc < threshold)
+                    {
+                        File.Delete(filePath);
+                        deletedCount++;
+                        _logger.LogInformation("[FileStorageService] Deleted stale temporary upload file: '{File}' (Last modified: {Time})",
+                            filePath, fileInfo.LastWriteTimeUtc);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[FileStorageService] Failed to delete stale temporary file: '{File}'", filePath);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[FileStorageService] Failed to enumerate temporary files in '{TempPath}'", _tempPath);
+        }
+
+        return deletedCount;
+    }
 }

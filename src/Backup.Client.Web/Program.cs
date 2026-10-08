@@ -10,7 +10,7 @@ builder.Services.Configure<GatewayOptions>(
 
 // Register Client services
 builder.Services.AddSingleton<IClientIdentityService, ClientIdentityService>();
-builder.Services.AddTransient<BackupGatewayClient>();
+builder.Services.AddSingleton<BackupGatewayClient>();
 builder.Services.AddScoped<IBackupClientService, BackupClientService>();
 
 builder.Services.AddSingleton<ISyncProfileService, SyncProfileService>();

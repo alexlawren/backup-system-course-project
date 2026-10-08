@@ -8,6 +8,14 @@
 
 # Physical storage data
 data/
+demo_sync/
+
+# Client runtime state
+client-state.json
+sync-profile.json
+*.local-index.json
+*.part
+.restore.*.tmp
 
 # User-specific files
 *.rsuser

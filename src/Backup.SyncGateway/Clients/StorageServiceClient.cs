@@ -25,12 +25,22 @@ public class StorageServiceClient : IStorageServiceClient
         _writer = new ProtocolFrameWriter();
     }
 
+    public void Disconnect()
+    {
+        try { _stream?.Dispose(); } catch { }
+        _stream = null;
+        try { _tcpClient?.Dispose(); } catch { }
+        _tcpClient = null;
+    }
+
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
-        if (_tcpClient != null && _tcpClient.Connected)
+        if (_tcpClient != null && _tcpClient.Connected && _stream != null)
         {
             return;
         }
+
+        Disconnect();
 
         _tcpClient = new TcpClient();
         await _tcpClient.ConnectAsync(_host, _port, cancellationToken);
@@ -39,18 +49,27 @@ public class StorageServiceClient : IStorageServiceClient
 
     public async Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default)
     {
-        await EnsureConnectedAsync(cancellationToken);
-
-        var req = new HelloRequest { ClientName = clientName, Version = "1.0" };
-        var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.Hello, req, cancellationToken: cancellationToken);
-        var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-
-        if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
+        try
         {
-            return null;
-        }
+            await EnsureConnectedAsync(cancellationToken);
 
-        return await _reader.ReadJsonBodyAsync<HelloResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+            var req = new HelloRequest { ClientName = clientName, Version = "1.0" };
+            var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.Hello, req, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+            if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
+            {
+                Disconnect();
+                return null;
+            }
+
+            return await _reader.ReadJsonBodyAsync<HelloResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+        }
+        catch
+        {
+            Disconnect();
+            throw;
+        }
     }
 
     /// <summary>
@@ -71,97 +90,107 @@ public class StorageServiceClient : IStorageServiceClient
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(content);
 
-        await EnsureConnectedAsync(cancellationToken);
-
-        // 1. Send StoreFile descriptor
-        var storeFileHeader = await _writer.WriteJsonFrameAsync(
-            _stream!,
-            MessageType.StoreFile,
-            request,
-            cancellationToken: cancellationToken);
-
-        // 2. Await StoreFileReady response
-        var readyHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-        if (readyHeader == null)
+        try
         {
-            throw new ProtocolException("Remote host closed TCP stream before sending StoreFileReady.");
-        }
+            await EnsureConnectedAsync(cancellationToken);
 
-        if (readyHeader.MessageType == MessageType.Error)
-        {
-            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, readyHeader.BodyLength, cancellationToken);
-            return new StoreFileResultResponse
+            // 1. Send StoreFile descriptor
+            var storeFileHeader = await _writer.WriteJsonFrameAsync(
+                _stream!,
+                MessageType.StoreFile,
+                request,
+                cancellationToken: cancellationToken);
+
+            // 2. Await StoreFileReady response
+            var readyHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (readyHeader == null)
+            {
+                Disconnect();
+                throw new ProtocolException("Remote host closed TCP stream before sending StoreFileReady.");
+            }
+
+            if (readyHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, readyHeader.BodyLength, cancellationToken);
+                return new StoreFileResultResponse
+                {
+                    OperationId = request.OperationId,
+                    Success = false,
+                    ErrorCode = err?.Code ?? "ERROR",
+                    ErrorMessage = err?.Message ?? "Server returned error."
+                };
+            }
+
+            if (readyHeader.MessageType != MessageType.StoreFileReady)
+            {
+                throw new ProtocolException($"Expected StoreFileReady, received {readyHeader.MessageType}.");
+            }
+
+            var readyResp = await _reader.ReadJsonBodyAsync<StoreFileReadyResponse>(_stream!, readyHeader.BodyLength, cancellationToken);
+            if (readyResp == null || !readyResp.Accepted)
+            {
+                return new StoreFileResultResponse
+                {
+                    OperationId = request.OperationId,
+                    Success = false,
+                    ErrorCode = readyResp?.ErrorCode ?? "REJECTED",
+                    ErrorMessage = readyResp?.ErrorMessage ?? "StoreFile request rejected by server."
+                };
+            }
+
+            // 3. Stream binary payload via UploadFile frame
+            var uploadHeader = new ProtocolHeader
+            {
+                Magic = ProtocolConstants.Magic,
+                ProtocolVersion = ProtocolConstants.Version,
+                MessageType = MessageType.UploadFile,
+                MessageId = Guid.NewGuid(),
+                CorrelationId = storeFileHeader.MessageId,
+                ContentType = ProtocolContentTypes.ApplicationOctetStream,
+                BodyLength = request.ExpectedSize,
+                SentAtUtc = DateTime.UtcNow
+            };
+
+            await _writer.WriteFrameAsync(_stream!, uploadHeader, content, cancellationToken);
+
+            // 4. Await StoreFileResult response
+            var resultHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (resultHeader == null)
+            {
+                Disconnect();
+                throw new ProtocolException("Remote host closed TCP stream before sending StoreFileResult.");
+            }
+
+            if (resultHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, resultHeader.BodyLength, cancellationToken);
+                return new StoreFileResultResponse
+                {
+                    OperationId = request.OperationId,
+                    Success = false,
+                    ErrorCode = err?.Code ?? "ERROR",
+                    ErrorMessage = err?.Message ?? "Server returned error."
+                };
+            }
+
+            if (resultHeader.MessageType != MessageType.StoreFileResult)
+            {
+                throw new ProtocolException($"Expected StoreFileResult, received {resultHeader.MessageType}.");
+            }
+
+            var result = await _reader.ReadJsonBodyAsync<StoreFileResultResponse>(_stream!, resultHeader.BodyLength, cancellationToken);
+            return result ?? new StoreFileResultResponse
             {
                 OperationId = request.OperationId,
                 Success = false,
-                ErrorCode = err?.Code ?? "ERROR",
-                ErrorMessage = err?.Message ?? "Server returned error."
+                ErrorMessage = "Empty StoreFileResult response received."
             };
         }
-
-        if (readyHeader.MessageType != MessageType.StoreFileReady)
+        catch
         {
-            throw new ProtocolException($"Expected StoreFileReady, received {readyHeader.MessageType}.");
+            Disconnect();
+            throw;
         }
-
-        var readyResp = await _reader.ReadJsonBodyAsync<StoreFileReadyResponse>(_stream!, readyHeader.BodyLength, cancellationToken);
-        if (readyResp == null || !readyResp.Accepted)
-        {
-            return new StoreFileResultResponse
-            {
-                OperationId = request.OperationId,
-                Success = false,
-                ErrorCode = readyResp?.ErrorCode ?? "REJECTED",
-                ErrorMessage = readyResp?.ErrorMessage ?? "StoreFile request rejected by server."
-            };
-        }
-
-        // 3. Stream binary payload via UploadFile frame
-        var uploadHeader = new ProtocolHeader
-        {
-            Magic = ProtocolConstants.Magic,
-            ProtocolVersion = ProtocolConstants.Version,
-            MessageType = MessageType.UploadFile,
-            MessageId = Guid.NewGuid(),
-            CorrelationId = storeFileHeader.MessageId,
-            ContentType = ProtocolContentTypes.ApplicationOctetStream,
-            BodyLength = request.ExpectedSize,
-            SentAtUtc = DateTime.UtcNow
-        };
-
-        await _writer.WriteFrameAsync(_stream!, uploadHeader, content, cancellationToken);
-
-        // 4. Await StoreFileResult response
-        var resultHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-        if (resultHeader == null)
-        {
-            throw new ProtocolException("Remote host closed TCP stream before sending StoreFileResult.");
-        }
-
-        if (resultHeader.MessageType == MessageType.Error)
-        {
-            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, resultHeader.BodyLength, cancellationToken);
-            return new StoreFileResultResponse
-            {
-                OperationId = request.OperationId,
-                Success = false,
-                ErrorCode = err?.Code ?? "ERROR",
-                ErrorMessage = err?.Message ?? "Server returned error."
-            };
-        }
-
-        if (resultHeader.MessageType != MessageType.StoreFileResult)
-        {
-            throw new ProtocolException($"Expected StoreFileResult, received {resultHeader.MessageType}.");
-        }
-
-        var result = await _reader.ReadJsonBodyAsync<StoreFileResultResponse>(_stream!, resultHeader.BodyLength, cancellationToken);
-        return result ?? new StoreFileResultResponse
-        {
-            OperationId = request.OperationId,
-            Success = false,
-            ErrorMessage = "Empty StoreFileResult response received."
-        };
     }
 
     /// <summary>
@@ -197,64 +226,74 @@ public class StorageServiceClient : IStorageServiceClient
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(prepareDestinationAsync);
 
-        await EnsureConnectedAsync(cancellationToken);
-
-        // 1. Send GetStoredFile descriptor
-        await _writer.WriteJsonFrameAsync(_stream!, MessageType.GetStoredFile, request, cancellationToken: cancellationToken);
-
-        // 2. Receive GetStoredFileResult descriptor
-        var resultHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-        if (resultHeader == null)
+        try
         {
-            throw new ProtocolException("Remote host closed TCP stream unexpectedly.");
-        }
+            await EnsureConnectedAsync(cancellationToken);
 
-        if (resultHeader.MessageType == MessageType.Error)
-        {
-            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, resultHeader.BodyLength, cancellationToken);
-            return new GetStoredFileResultResponse
+            // 1. Send GetStoredFile descriptor
+            await _writer.WriteJsonFrameAsync(_stream!, MessageType.GetStoredFile, request, cancellationToken: cancellationToken);
+
+            // 2. Receive GetStoredFileResult descriptor
+            var resultHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (resultHeader == null)
             {
-                StorageKey = request.StorageKey,
-                Success = false,
-                ErrorCode = err?.Code ?? "ERROR",
-                ErrorMessage = err?.Message ?? "Server returned error."
-            };
-        }
+                Disconnect();
+                throw new ProtocolException("Remote host closed TCP stream unexpectedly.");
+            }
 
-        if (resultHeader.MessageType != MessageType.GetStoredFileResult)
-        {
-            throw new ProtocolException($"Expected GetStoredFileResult, received {resultHeader.MessageType}.");
-        }
-
-        var result = await _reader.ReadJsonBodyAsync<GetStoredFileResultResponse>(_stream!, resultHeader.BodyLength, cancellationToken);
-        if (result == null || !result.Success)
-        {
-            return result ?? new GetStoredFileResultResponse
+            if (resultHeader.MessageType == MessageType.Error)
             {
-                StorageKey = request.StorageKey,
-                Success = false,
-                ErrorMessage = "File not found or empty result received."
-            };
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, resultHeader.BodyLength, cancellationToken);
+                return new GetStoredFileResultResponse
+                {
+                    StorageKey = request.StorageKey,
+                    Success = false,
+                    ErrorCode = err?.Code ?? "ERROR",
+                    ErrorMessage = err?.Message ?? "Server returned error."
+                };
+            }
+
+            if (resultHeader.MessageType != MessageType.GetStoredFileResult)
+            {
+                throw new ProtocolException($"Expected GetStoredFileResult, received {resultHeader.MessageType}.");
+            }
+
+            var result = await _reader.ReadJsonBodyAsync<GetStoredFileResultResponse>(_stream!, resultHeader.BodyLength, cancellationToken);
+            if (result == null || !result.Success)
+            {
+                return result ?? new GetStoredFileResultResponse
+                {
+                    StorageKey = request.StorageKey,
+                    Success = false,
+                    ErrorMessage = "File not found or empty result received."
+                };
+            }
+
+            // Prepare destination stream before receiving binary payload
+            var destinationStream = await prepareDestinationAsync(result);
+
+            // 3. Receive StoredFile binary frame
+            var storedHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (storedHeader == null)
+            {
+                Disconnect();
+                throw new ProtocolException("Remote host closed TCP stream before sending StoredFile payload.");
+            }
+
+            if (storedHeader.MessageType != MessageType.StoredFile)
+            {
+                throw new ProtocolException($"Expected StoredFile binary frame, received {storedHeader.MessageType}.");
+            }
+
+            await _reader.ReadBodyToStreamAsync(_stream!, destinationStream, storedHeader.BodyLength, cancellationToken);
+            await destinationStream.FlushAsync(cancellationToken);
+            return result;
         }
-
-        // Prepare destination stream before receiving binary payload
-        var destinationStream = await prepareDestinationAsync(result);
-
-        // 3. Receive StoredFile binary frame
-        var storedHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-        if (storedHeader == null)
+        catch
         {
-            throw new ProtocolException("Remote host closed TCP stream before sending StoredFile payload.");
+            Disconnect();
+            throw;
         }
-
-        if (storedHeader.MessageType != MessageType.StoredFile)
-        {
-            throw new ProtocolException($"Expected StoredFile binary frame, received {storedHeader.MessageType}.");
-        }
-
-        await _reader.ReadBodyToStreamAsync(_stream!, destinationStream, storedHeader.BodyLength, cancellationToken);
-        await destinationStream.FlushAsync(cancellationToken);
-        return result;
     }
 
     private async Task EnsureConnectedAsync(CancellationToken cancellationToken)
@@ -267,21 +306,12 @@ public class StorageServiceClient : IStorageServiceClient
 
     public void Dispose()
     {
-        _stream?.Dispose();
-        _stream = null;
-        _tcpClient?.Dispose();
-        _tcpClient = null;
+        Disconnect();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_stream != null)
-        {
-            await _stream.DisposeAsync();
-            _stream = null;
-        }
-
-        _tcpClient?.Dispose();
-        _tcpClient = null;
+        Disconnect();
+        await Task.CompletedTask;
     }
 }

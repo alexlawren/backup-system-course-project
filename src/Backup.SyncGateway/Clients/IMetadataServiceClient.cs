@@ -4,6 +4,7 @@ namespace Backup.SyncGateway.Clients;
 
 public interface IMetadataServiceClient : IAsyncDisposable
 {
+    void Disconnect();
     Task ConnectAsync(CancellationToken cancellationToken = default);
     Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default);
     Task<RegisterClientResponse> RegisterClientAsync(RegisterClientRequest request, CancellationToken cancellationToken = default);

@@ -11,7 +11,7 @@
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Change-set #6 — Restore Flow + File/Version Browser</div>
+        <div class="badge-tag">Change-set #7 — Final Release / Hardening</div>
         <h1>Course Project / Backup System</h1>
         <p class="subtitle">«Клиент-серверная система резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений»</p>
     </header>
@@ -26,7 +26,7 @@
                     <span class="status-name">Sync Gateway</span>
                     <span class="status-role">TCP Entry Point (127.0.0.1:5000)</span>
                     <span class="status-badge @(isGatewayConnected ? "badge-green" : "badge-amber")">
-                        @(isGatewayConnected ? "Connected" : "Disconnected / Offline")
+                        @(isGatewayConnected ? "Online" : "Offline")
                     </span>
                 </div>
             </div>
@@ -34,10 +34,21 @@
             <div class="status-card @(SyncEngine.IsRunning ? "active" : "")">
                 <div class="status-indicator @(SyncEngine.IsRunning ? "online" : "pending")"></div>
                 <div class="status-info">
-                    <span class="status-name">Automatic Sync Watcher</span>
+                    <span class="status-name">Automatic Sync</span>
                     <span class="status-role">FileSystemWatcher + Debounce (~750ms)</span>
                     <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
                         @(SyncEngine.IsRunning ? "Running" : "Stopped")
+                    </span>
+                </div>
+            </div>
+
+            <div class="status-card @(SyncEngine.IsReconciling || !SyncEngine.ReconciliationRequired ? "active" : "")">
+                <div class="status-indicator @(SyncEngine.IsReconciling || !SyncEngine.ReconciliationRequired ? "online" : "pending")"></div>
+                <div class="status-info">
+                    <span class="status-name">Reconciliation</span>
+                    <span class="status-role">Server-Client Metadata Sync</span>
+                    <span class="status-badge @(SyncEngine.IsReconciling ? "badge-gray" : (!SyncEngine.ReconciliationRequired ? "badge-green" : "badge-amber"))">
+                        @(SyncEngine.IsReconciling ? "Running" : (!SyncEngine.ReconciliationRequired ? "Synced" : "Required"))
                     </span>
                 </div>
             </div>
@@ -135,6 +146,9 @@
 
                 <span class="kv-key">Last Reconciliation:</span>
                 <span class="kv-value">@(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "Never")</span>
+
+                <span class="kv-key">Total Files (Server):</span>
+                <span class="kv-value">@(totalFilesCount.HasValue ? totalFilesCount.Value.ToString() : "—")</span>
 
                 <span class="kv-key">Last Sync Result:</span>
                 <span class="kv-value">@(SyncEngine.LastSyncResult ?? "—")</span>
@@ -270,6 +284,7 @@
     private ClientState? clientState;
     private bool isGatewayConnected;
     private bool isLoading;
+    private int? totalFilesCount;
 
     private string clientStatusMessage = "";
     private bool clientStatusIsError;
@@ -303,6 +318,7 @@
             }
 
             await CheckGatewayConnectionAsync();
+            await LoadTotalFilesCountAsync();
         }
         catch (Exception ex)
         {
@@ -320,7 +336,27 @@
             activeBackupSetId = profile.BackupSetId;
             activeLocalRootPath = profile.LocalRootPath;
         }
+        await LoadTotalFilesCountAsync();
         StateHasChanged();
+    }
+
+    private async Task LoadTotalFilesCountAsync()
+    {
+        if (isGatewayConnected && activeBackupSetId != Guid.Empty)
+        {
+            try
+            {
+                var filesResp = await BackupService.GetFilesAsync(activeBackupSetId);
+                if (filesResp.Success && filesResp.Files != null)
+                {
+                    totalFilesCount = filesResp.Files.Count;
+                }
+            }
+            catch
+            {
+                totalFilesCount = null;
+            }
+        }
     }
 
     private async Task CheckGatewayConnectionAsync()
@@ -502,6 +538,7 @@
         try
         {
             await SyncEngine.ReconcileNowAsync();
+            await LoadTotalFilesCountAsync();
             backupSetMessage = "Reconciliation finished.";
             backupSetIsError = false;
         }

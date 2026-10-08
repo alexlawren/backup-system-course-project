@@ -196,7 +196,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Failed to proxy RegisterClient to MetadataService");
             await _writer.WriteJsonFrameAsync(stream, MessageType.RegisterClientResult,
-                new RegisterClientResponse { Success = false, ErrorMessage = $"MetadataService unavailable: {ex.Message}" },
+                new RegisterClientResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -221,7 +221,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Failed to proxy CreateBackupSet to MetadataService");
             await _writer.WriteJsonFrameAsync(stream, MessageType.CreateBackupSetResult,
-                new CreateBackupSetResponse { Success = false, ErrorMessage = $"MetadataService unavailable: {ex.Message}" },
+                new CreateBackupSetResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -663,7 +663,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Failed to build SyncPlan for BackupSet {BackupSetId}", request.BackupSetId);
             await _writer.WriteJsonFrameAsync(stream, MessageType.SyncPlan,
-                new SyncPlanResponse { Success = false, ErrorMessage = $"SyncGateway error: {ex.Message}" },
+                new SyncPlanResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -716,7 +716,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Error handling FileDeleted for '{Path}'", normalizedPath);
             await _writer.WriteJsonFrameAsync(stream, MessageType.FileDeleted,
-                new FileDeletedResponse { Success = false, ErrorMessage = ex.Message },
+                new FileDeletedResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -778,7 +778,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Error handling FileRenamed for '{OldPath}' -> '{NewPath}'", oldNormalized, newNormalized);
             await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed,
-                new FileRenamedResponse { Success = false, ErrorMessage = ex.Message },
+                new FileRenamedResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -803,7 +803,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Failed to retrieve files from MetadataService");
             await _writer.WriteJsonFrameAsync(stream, MessageType.FilesResponse,
-                new GetFilesResponse { Success = false, ErrorMessage = $"Metadata error: {ex.Message}" },
+                new GetFilesResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -828,7 +828,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Failed to retrieve versions from MetadataService");
             await _writer.WriteJsonFrameAsync(stream, MessageType.VersionsResponse,
-                new GetVersionsResponse { Success = false, ErrorMessage = $"Metadata error: {ex.Message}" },
+                new GetVersionsResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }
@@ -853,7 +853,7 @@ public class GatewaySessionHandler : IAsyncDisposable
         {
             _logger.LogError(ex, "[SyncGateway] Failed to retrieve changelog from MetadataService");
             await _writer.WriteJsonFrameAsync(stream, MessageType.ChangeLogResponse,
-                new GetChangeLogResponse { Success = false, ErrorMessage = $"Metadata error: {ex.Message}" },
+                new GetChangeLogResponse { Success = false, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
     }

@@ -43,8 +43,11 @@ public class BackupClientService : IBackupClientService
         try
         {
             var state = await _identityService.GetStateAsync(cancellationToken);
-            var hello = await _gatewayClient.HelloAsync("Backup.Client.Web", state.ClientId, cancellationToken);
-            return hello != null && hello.Success;
+            if (state?.ClientId.HasValue == true)
+            {
+                _gatewayClient.SetActiveClientId(state.ClientId.Value);
+            }
+            return await _gatewayClient.PingAsync(cancellationToken);
         }
         catch
         {

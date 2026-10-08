@@ -40,7 +40,18 @@
                         Queried through SyncGateway → MetadataService (Immutable Audit Records)
                     </p>
                 </div>
-                <div>
+                <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <label for="actionFilter" style="font-size: 0.85rem; color: var(--text-secondary);">Action Filter:</label>
+                        <select id="actionFilter" class="form-input" style="width: auto; padding: 0.35rem 0.75rem;" @bind="selectedAction">
+                            <option value="">ALL</option>
+                            <option value="CREATE">CREATE</option>
+                            <option value="MODIFY">MODIFY</option>
+                            <option value="RENAME">RENAME</option>
+                            <option value="DELETE">DELETE</option>
+                            <option value="RESTORE">RESTORE</option>
+                        </select>
+                    </div>
                     <button class="btn btn-secondary" @onclick="LoadLogAsync" disabled="@isLoadingLog">
                         <span>🔄 Refresh Log</span>
                     </button>
@@ -78,7 +89,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            @foreach (var entry in entries)
+                            @foreach (var entry in filteredEntries)
                             {
                                 <tr>
                                     <td style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
@@ -118,7 +129,7 @@
                 </div>
 
                 <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary);">
-                    <span>Total journal entries: @entries.Count</span>
+                    <span>Displaying @filteredEntries.Count() of @entries.Count journal entries</span>
                 </div>
             }
         </section>
@@ -131,6 +142,12 @@
     private bool isLoadingLog = false;
     private string? errorMessage;
     private List<ChangeLogEntryDto> entries = new();
+    private string selectedAction = "";
+
+    private IEnumerable<ChangeLogEntryDto> filteredEntries =>
+        string.IsNullOrWhiteSpace(selectedAction)
+            ? entries
+            : entries.Where(e => string.Equals(e.Action, selectedAction, StringComparison.OrdinalIgnoreCase));
 
     protected override async Task OnInitializedAsync()
     {

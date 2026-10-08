@@ -31,7 +31,38 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
     {
     }
 
-    public bool IsConnected => _tcpClient != null && _tcpClient.Connected;
+    private static readonly TimeSpan[] ReconnectBackoffs =
+    [
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(2),
+        TimeSpan.FromSeconds(5)
+    ];
+
+    private bool _wasConnectedBefore;
+    private Guid? _activeClientId;
+    private string _clientName = "Backup.Client.Web";
+
+    public Guid? ActiveClientId => _activeClientId;
+    public event Action? Reconnected;
+
+    public void SetActiveClientId(Guid? clientId)
+    {
+        if (clientId.HasValue && clientId != Guid.Empty)
+        {
+            _activeClientId = clientId;
+        }
+    }
+
+    public void MarkDisconnected()
+    {
+        try { _stream?.Dispose(); } catch { }
+        _stream = null;
+        try { _tcpClient?.Dispose(); } catch { }
+        _tcpClient = null;
+    }
+
+    public bool IsConnected => _tcpClient != null && _tcpClient.Connected && _stream != null;
 
     private async Task ConnectInternalAsync(CancellationToken cancellationToken = default)
     {
@@ -40,13 +71,61 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             return;
         }
 
-        _stream?.Dispose();
-        _stream = null;
-        _tcpClient?.Dispose();
+        MarkDisconnected();
 
-        _tcpClient = new TcpClient();
-        await _tcpClient.ConnectAsync(_host, _port, cancellationToken);
-        _stream = _tcpClient.GetStream();
+        bool wasConnected = _wasConnectedBefore;
+        Exception? lastEx = null;
+
+        for (int attempt = 0; attempt <= ReconnectBackoffs.Length; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                _tcpClient = new TcpClient();
+                await _tcpClient.ConnectAsync(_host, _port, cancellationToken);
+                _stream = _tcpClient.GetStream();
+
+                if (_activeClientId.HasValue || wasConnected)
+                {
+                    var req = new HelloRequest
+                    {
+                        ClientName = _clientName,
+                        Version = "1.0",
+                        Role = "Client",
+                        MachineName = Environment.MachineName,
+                        ClientId = _activeClientId
+                    };
+
+                    await _writer.WriteJsonFrameAsync(_stream, MessageType.Hello, req, cancellationToken: cancellationToken);
+                    var respHeader = await _reader.ReadHeaderAsync(_stream, cancellationToken);
+                    if (respHeader != null && respHeader.MessageType == MessageType.HelloAck)
+                    {
+                        await _reader.ReadJsonBodyAsync<HelloResponse>(_stream, respHeader.BodyLength, cancellationToken);
+                    }
+                }
+
+                _wasConnectedBefore = true;
+
+                if (wasConnected)
+                {
+                    Reconnected?.Invoke();
+                }
+
+                return;
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or TimeoutException or ProtocolException)
+            {
+                lastEx = ex;
+                MarkDisconnected();
+
+                if (attempt < ReconnectBackoffs.Length)
+                {
+                    await Task.Delay(ReconnectBackoffs[attempt], cancellationToken);
+                }
+            }
+        }
+
+        throw lastEx ?? new SocketException((int)SocketError.ConnectionRefused);
     }
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
@@ -67,6 +146,12 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         Guid? clientId = null,
         CancellationToken cancellationToken = default)
     {
+        _clientName = clientName;
+        if (clientId.HasValue && clientId != Guid.Empty)
+        {
+            _activeClientId = clientId;
+        }
+
         await _connectionLock.WaitAsync(cancellationToken);
         try
         {
@@ -78,7 +163,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
                 Version = "1.0",
                 Role = "Client",
                 MachineName = Environment.MachineName,
-                ClientId = clientId
+                ClientId = clientId ?? _activeClientId
             };
 
             var reqHeader = await _writer.WriteJsonFrameAsync(_stream!, MessageType.Hello, req, cancellationToken: cancellationToken);
@@ -86,10 +171,42 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
             {
+                MarkDisconnected();
                 return null;
             }
 
             return await _reader.ReadJsonBodyAsync<HelloResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
+    }
+
+    public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+    {
+        await _connectionLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureConnectedAsync(cancellationToken);
+            await _writer.WriteControlFrameAsync(_stream!, MessageType.Ping, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (respHeader == null)
+            {
+                MarkDisconnected();
+                return false;
+            }
+            return respHeader.MessageType == MessageType.Pong;
+        }
+        catch
+        {
+            MarkDisconnected();
+            return false;
         }
         finally
         {
@@ -111,6 +228,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -125,7 +243,16 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             }
 
             var result = await _reader.ReadJsonBodyAsync<RegisterClientResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+            if (result != null && result.Success && result.ClientId != Guid.Empty)
+            {
+                _activeClientId = result.ClientId;
+            }
             return result ?? new RegisterClientResponse { Success = false, ErrorMessage = "Empty RegisterClient response." };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -147,6 +274,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -162,6 +290,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             var result = await _reader.ReadJsonBodyAsync<CreateBackupSetResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new CreateBackupSetResponse { Success = false, ErrorMessage = "Empty CreateBackupSet response." };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -183,6 +316,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -204,6 +338,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<SyncPlanResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new SyncPlanResponse { Success = false, ErrorMessage = "Empty SyncPlan response." };
         }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
+        }
         finally
         {
             _connectionLock.Release();
@@ -224,6 +363,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -245,6 +385,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<FileDeletedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new FileDeletedResponse { Success = false, ErrorMessage = "Empty FileDeleted response." };
         }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
+        }
         finally
         {
             _connectionLock.Release();
@@ -265,6 +410,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -285,6 +431,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             var result = await _reader.ReadJsonBodyAsync<FileRenamedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new FileRenamedResponse { Success = false, ErrorMessage = "Empty FileRenamed response." };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -352,6 +503,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP stream while awaiting response to FileChanged.");
             }
 
@@ -429,6 +581,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var completedHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
             if (completedHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP stream while awaiting UploadCompleted.");
             }
 
@@ -455,6 +608,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
                 ErrorMessage = "Empty UploadCompleted response received."
             };
         }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
+        }
         finally
         {
             _connectionLock.Release();
@@ -475,6 +633,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -491,6 +650,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             var result = await _reader.ReadJsonBodyAsync<GetFilesResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new GetFilesResponse { Success = false, ErrorMessage = "Empty FilesResponse received." };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -512,6 +676,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -528,6 +693,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             var result = await _reader.ReadJsonBodyAsync<GetVersionsResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new GetVersionsResponse { Success = false, ErrorMessage = "Empty VersionsResponse received." };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -549,6 +719,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection.");
             }
 
@@ -565,6 +736,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             var result = await _reader.ReadJsonBodyAsync<GetChangeLogResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new GetChangeLogResponse { Success = false, ErrorMessage = "Empty ChangeLogResponse received." };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -599,6 +775,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var readyHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
             if (readyHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection before sending RestoreReady.");
             }
 
@@ -633,6 +810,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var fileHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
             if (fileHeader == null)
             {
+                MarkDisconnected();
                 throw new ProtocolException("Remote host closed TCP connection before sending RestoreFile payload.");
             }
 
@@ -747,6 +925,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             }
             catch (Exception ex)
             {
+                MarkDisconnected();
                 if (File.Exists(tempPath))
                 {
                     try { File.Delete(tempPath); } catch { }
@@ -779,11 +958,17 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             if (respHeader == null || respHeader.MessageType != MessageType.RestoreCompleted)
             {
+                if (respHeader == null) MarkDisconnected();
                 return new RestoreCompletedResponse { Success = true };
             }
 
             var result = await _reader.ReadJsonBodyAsync<RestoreCompletedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new RestoreCompletedResponse { Success = true };
+        }
+        catch (Exception ex) when (ex is IOException or SocketException)
+        {
+            MarkDisconnected();
+            throw;
         }
         finally
         {
@@ -815,23 +1000,13 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
     public void Dispose()
     {
-        _stream?.Dispose();
-        _stream = null;
-        _tcpClient?.Dispose();
-        _tcpClient = null;
+        MarkDisconnected();
         _connectionLock.Dispose();
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_stream != null)
-        {
-            await _stream.DisposeAsync();
-            _stream = null;
-        }
-
-        _tcpClient?.Dispose();
-        _tcpClient = null;
-        _connectionLock.Dispose();
+        Dispose();
+        return ValueTask.CompletedTask;
     }
 }

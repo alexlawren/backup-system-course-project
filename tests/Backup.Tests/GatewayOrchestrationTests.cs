@@ -756,6 +756,7 @@ internal class FakeMetadataServiceClient : IMetadataServiceClient
     public Func<CommitVersionRequest, Task<CommitVersionResponse>>? CommitVersionFunc { get; set; }
 
     public Task ConnectAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public void Disconnect() { }
     public Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default) =>
         Task.FromResult<HelloResponse?>(new HelloResponse { Success = true, ServerName = "FakeMetadata" });
 
@@ -850,6 +851,7 @@ internal class FakeStorageServiceClient : IStorageServiceClient
     public Func<GetStoredFileRequest, Func<GetStoredFileResultResponse, Task<Stream>>, Task<GetStoredFileResultResponse>>? StreamStoredFileFunc { get; set; }
 
     public Task ConnectAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public void Disconnect() { }
     public Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default) =>
         Task.FromResult<HelloResponse?>(new HelloResponse { Success = true, ServerName = "FakeStorage" });
 

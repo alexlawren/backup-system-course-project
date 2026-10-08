@@ -22,4 +22,6 @@ public interface IFileStorageService
     FileStream OpenStoredFileReadStream(string physicalPath);
 
     bool TryResolvePhysicalPath(string storageKey, out string physicalPath, out string? errorMessage);
+
+    int CleanupExpiredTempFiles(TimeSpan maxAge);
 }

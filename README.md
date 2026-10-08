@@ -2,123 +2,171 @@
 
 Курсовой проект по дисциплине «Программирование сетевых приложений».
 
-**Change-set #6:** RESTORE FLOW + FILE/VERSION BROWSER (полноценное восстановление выбранной исторической версии файла из StorageService обратно в отслеживаемую локальную папку клиента; неизменяемость версий с инкрементом `CurrentVersionNumber`; пред-бэкап несохраненных локальных правок пользователя; потоковая ретрансляция со шлюза с ограниченным буфером 64 KiB без промежуточных файлов на диске Gateway; временный файл в каталоге назначения с инкрементальной проверкой SHA-256 и размера; атомарная замена `File.Move`; интеллектуальное подавление эхо-событий FileSystemWatcher через `RestoreSuppressionService`; сохранение происхождения операции `OperationKind` в `pending_file_operations` и фиксация `Action = RESTORE` в `change_logs`; восстановление удаленных файлов с реактивацией; защита от гонок потоков через сериализацию сокета и per-path lock; веб-страницы `/files`, `/files/{fileId}`, `/history` на Blazor Server через Gateway).
+**Change-set #7:** FINAL HARDENING + DEMO READINESS + DOCUMENTATION (стабилизация и отказоустойчивость существующей архитектуры v1.1; жизненный цикл переподключения клиента Client -> Gateway с экспоненциальным backoff и флагом `ReconciliationRequired`; изоляция сбоев downstream-микросервисов Metadata/Storage на шлюзе с возвратом кодов `METADATA_UNAVAILABLE` и `STORAGE_UNAVAILABLE` без падения Gateway; корректное мягкое завершение процессов Graceful Shutdown; фоновые сборщики мусора просроченных временных операций `pending_file_operations` и временных файлов `.tmp/*.part` без риска для неизменяемых блобов; неразрушающий верификатор согласованности `StorageConsistencyVerifier`; поддержка одновременных изолированных сессий клиентов; сквозное потоковое тестирование больших файлов 32 MiB; интерактивный UI Dashboard со статусом реконсиляции и фильтром аудита `/history`; 171 автоматический тест).
 
 ---
 
-## 1. Системные требования
+## 1. Обзор проекта (Project Overview)
 
-- **Операционная система:** Windows / Linux / macOS.
-- **Платформа:** .NET 9 SDK (целевая платформа `net9.0`).
-- **Entity Framework Core CLI:** `dotnet ef` (версия 9.0.x).
-- **База данных:** PostgreSQL 17 (локально или через Docker Compose).
+Система представляет собой кроссплатформенное распределенное клиент-серверное решение для автоматического инкрементального резервного копирования файлов с контролем версий, защитой от потери несохраненных правок, ведением аудиторского журнала и возможностью восстановления любой исторической версии обратно в локальную рабочую директорию.
+
+Ключевые свойства:
+- **Собственный сетевой протокол:** бинарный потоковый TCP Protocol v1 поверх сырых сокетов (`System.Net.Sockets`) без использования HTTP/REST/gRPC между сервисами;
+- **Надежное двухфазное версионирование:** гарантированное сохранение физического блоба в хранилище ДО фиксации метаданных в транзакции PostgreSQL;
+- **Неизменяемость версий (Version Immutability):** старые ревизии никогда не перезаписываются; операция восстановления создает новую ревизию с сохранением всей цепочки истории;
+- **Константный расход памяти:** потоковая ретрансляция данных через Gateway с буфером 64 KiB без промежуточных файлов на диске шлюза и без вычитки файлов целиком в оперативную память;
+- **Автоматическая синхронизация:** интеллектуальный `FileSystemWatcher` с дебаунсом 750 мс, подавлением эхо-событий восстановления и начальной реконсиляцией манифеста.
 
 ---
 
-## 2. Развертывание PostgreSQL
+## 2. Архитектура системы (Architecture v1.1)
 
-### Вариант А: Использование Docker Compose (рекомендуется)
+```
+Browser (Пользователь)
+    |
+    | HTTP / Blazor (http://localhost:5100)
+    v
+Backup.Client.Web (Локальный UI клиента + FileSystemWatcher + SyncEngine)
+    |
+    | TCP (127.0.0.1:5000) [Protocol v1]
+    v
+Backup.SyncGateway (Внешний шлюз синхронизации и оркестратор)
+    |
+    +---- TCP (127.0.0.1:5001) [Protocol v1] ----> Backup.MetadataService
+    |                                                |
+    |                                                | EF Core 9 / Npgsql
+    |                                                v
+    |                                              PostgreSQL (backup_system)
+    |
+    +---- TCP (127.0.0.1:5002) [Protocol v1] ----> Backup.StorageService
+                                                     |
+                                                     v
+                                               File Storage (data/storage)
+```
 
-1. Убедитесь, что Docker Desktop запущен.
-2. Скопируйте `.env.example` в `.env` (при необходимости скорректируйте пароль):
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-3. Запустите контейнер PostgreSQL:
+Архитектурные инварианты:
+1. База данных PostgreSQL доступна **исключительно** сервису `Backup.MetadataService`.
+2. Файловое хранилище доступно **исключительно** сервису `Backup.StorageService`.
+3. Клиент взаимодействует **исключительно** со шлюзом `Backup.SyncGateway`.
+4. Шлюз оркеструет запросы, не имея прямого доступа к базе данных или файловому каталогу хранилища.
+
+---
+
+## 3. Системные требования (Requirements)
+
+- **ОС:** Windows 10/11, Linux (Ubuntu 22.04+), macOS.
+- **Среда выполнения:** .NET 9 SDK (целевая платформа `net9.0`).
+- **EF Core CLI:** `dotnet tool install --global dotnet-ef` (версия 9.x).
+- **СУБД:** PostgreSQL 17 (нативная служба или контейнер Docker).
+
+---
+
+## 4. Конфигурация сервисов (Configuration)
+
+Все сетевые хосты, порты и пути к данным настраиваются в файлах `appsettings.json` соответствующих проектов:
+
+| Сервис | Файл конфигурации | Параметры по умолчанию |
+| :--- | :--- | :--- |
+| **Backup.MetadataService** | `src/Backup.MetadataService/appsettings.json` | Порт: `5001`, ConnectionString: `Host=127.0.0.1;Port=5432;Database=backup_system;Username=backup_app;Password=...` |
+| **Backup.StorageService** | `src/Backup.StorageService/appsettings.json` | Порт: `5002`, RootPath: `data/storage` |
+| **Backup.SyncGateway** | `src/Backup.SyncGateway/appsettings.json` | Порт: `5000`, MetadataHost: `127.0.0.1:5001`, StorageHost: `127.0.0.1:5002` |
+| **Backup.Client.Web** | `src/Backup.Client.Web/appsettings.json` | URL: `http://localhost:5100`, GatewayHost: `127.0.0.1:5000`, DataRoot: `data/client` |
+
+---
+
+## 5. PostgreSQL и Docker (PostgreSQL / Docker)
+
+### Вариант А: Использование Docker Compose
+1. Убедитесь, что демон Docker запущен.
+2. Запустите контейнер PostgreSQL:
    ```powershell
    docker compose up -d
    ```
-4. Проверьте статус контейнера:
+3. Проверьте статус контейнера:
    ```powershell
    docker compose ps
    ```
 
-### Вариант Б: Локальный экземпляр PostgreSQL 17
+> [!NOTE]
+> **Docker verification audit:** В среде разработки Windows при неактивном пайпе демона Docker Desktop верификация выполнена с отметкой:
+> `Docker verification = NOT EXECUTED: Docker daemon pipe was inactive on host; native PostgreSQL 17 service used on 127.0.0.1:5432`.
 
-Если PostgreSQL установлен локально в системе:
-1. Создайте пользователя и базу данных (пароль по умолчанию `backup_app_dev_secret_2026`):
+### Вариант Б: Локальный PostgreSQL 17
+Если PostgreSQL установлен локально:
+1. Создайте пользователя и базу данных:
    ```sql
    CREATE USER backup_app WITH PASSWORD 'backup_app_dev_secret_2026' CREATEDB;
    CREATE DATABASE backup_system OWNER backup_app;
    ```
-2. Строка подключения конфигурируется в `src/Backup.MetadataService/appsettings.json` или через переменную окружения `ConnectionStrings__MetadataDb`.
+2. Убедитесь, что служба PostgreSQL слушает порт `5432`.
 
 ---
 
-## 3. Применение миграций базы данных
+## 6. Применение миграций базы данных (Migrations Policy)
 
-После запуска PostgreSQL выполните обновление схемы через EF Core CLI:
+> [!IMPORTANT]
+> **Политика миграций:** В соответствии с промышленным стандартом сервис `Backup.MetadataService` **НЕ выполняет** автоматических неконтролируемых миграций при старте. Метод `Database.EnsureCreated()` запрещен. Миграции накатаны и задокументированы через официальный CLI Entity Framework Core.
 
+Команда применения миграций из корня репозитория:
 ```powershell
 dotnet ef database update --project src/Backup.MetadataService --startup-project src/Backup.MetadataService
 ```
 
-*Создаются и обновляются таблицы:*
-- `clients` — зарегистрированные клиенты;
+*Применяемые сущности:*
+- `clients` — зарегистрированные рабочие станции;
 - `backup_sets` — наборы резервного копирования;
-- `files` — метаданные файлов с `UNIQUE (BackupSetId, RelativePath)`;
-- `file_versions` — зафиксированные ревизии с `UNIQUE (FileId, VersionNumber)` и `UNIQUE (OperationId)` для идемпотентного коммита;
-- `change_logs` — аудит и журнал событий (`CREATE`, `MODIFY`, `DELETE`, `RENAME`, `RESTORE`);
-- `pending_file_operations` — подготовленные транзакции загрузки с полем `OperationKind` (`"NORMAL"`, `"RESTORE"`).
+- `files` — метаданные файлов (`UNIQUE (BackupSetId, RelativePath)`);
+- `file_versions` — зафиксированные ревизии (`UNIQUE (FileId, VersionNumber)`, `UNIQUE (OperationId)`);
+- `change_logs` — журнал аудита событий (`CREATE`, `MODIFY`, `DELETE`, `RENAME`, `RESTORE`);
+- `pending_file_operations` — подготовленные транзакции загрузки (`OperationKind`, `ExpiresAtUtc`).
 
 ---
 
-## 4. Сборка и тестирование решения
+## 7. Сборка и тестирование (Build & Test)
 
 ```powershell
-# Восстановление зависимостей
+# 1. Восстановление зависимостей
 dotnet restore
 
-# Сборка решения
+# 2. Сборка всего решения
 dotnet build
 
-# Запуск полного набора модульных и интеграционных тестов (157 тестов)
+# 3. Запуск полного набора тестов (171 тест)
 dotnet test
 ```
 
-Тестовый набор включает:
-- 12 тестов фрейминга и потокового чтения Protocol v1 (включая фрагментированные TCP-потоки);
-- 19 тестов валидации относительных путей `ProtocolPathValidator` (защита от path traversal, абсолютных путей, спецсимволов);
-- 22 теста бизнес-логики `MetadataApplicationService` (включая 6 тестов идемпотентности `CommitVersion`, защиту от повторного создания версии и валидацию конфликтов);
-- 2 комплексных интеграционных теста метаданных (персистентность в PostgreSQL и сокеты TCP Protocol v1);
-- 12 модульных тестов `FileStorageService` и `StorageKeyHelper` (детерминированный ключ, валидация SHA-256, файлы нулевого размера, защита от path traversal, очистка temp-файлов);
-- 26 интеграционных TCP-тестов физического хранилища (сквозной цикл `StoreFile` -> `StoreFileReady` -> `UploadFile` -> `StoreFileResult`, скачивание `GetStoredFile`, конкурентные клиенты, большие файлы 8 MiB, обнаружение конфликтов и идемпотентность, проверка обрыва соединения);
-- 1 сквозной smoke-тест взаимодействия `Backup.SyncGateway` и `Backup.StorageService`;
-- 13 тестов оркестрации `SyncGateway` (решение `UploadRequired`, изоляция сессий, no interleaving, streaming relay без буферизации файла, валидация путей, обработка сбоев хранилища, retry при тайм-ауте `CommitVersion`);
-- 2 комплексных E2E-интеграционных теста жизненного цикла резервного копирования одиночного файла;
-- 1 живой интеграционный smoke-тест верификации 4 сервисов;
-- 9 тестов согласования манифестов `Manifest` $\rightarrow$ `SyncPlan`, снимков сервера без N+1 запросов и исправления семантики возврата удаленного файла;
-- 6 тестов локального кеша индексов `LocalFileIndexService` и сканера (повторное использование хэша, пересчет, битый кеш, удаление файлов, атомарная запись);
-- 9 тестов `FileSystemWatcher` и дебаунса (схлопывание `Changed`, `Created` + `Changed`, удаление, переименования, независимость файлов, переполнение буфера, обработка пред-сканированных событий);
-- 2 комплексных E2E-теста полного жизненного цикла автоматической синхронизации директории (Create $\rightarrow$ Modify $\rightarrow$ Rename $\rightarrow$ Delete $\rightarrow$ Recreate) и начальной офлайн-реконсиляции на реальном кластере PostgreSQL + Storage + Gateway;
-- 8 тестов потокового скачивания и безопасности восстановления `RestoreDownloadTests` (разрешение версий, ошибка отсутствующей версии, binary round-trip, большой файл 5 МБ, откат при расхождении размера/хэша, отказ при path traversal, воссоздание удаленных родительских каталогов);
-- 6 тестов интеллектуального подавления эхо-событий `RestoreWatcherSuppressionTests` (подавление по хэшу, множественные всплески, реакция на новые правки с другим хэшем, истечение TTL, фильтрация по относительному пути);
-- 3 интеграционных теста семантики версионирования `RestoreVersionSemanticsTests` (v1 $\rightarrow$ v2 $\rightarrow$ v3 $\rightarrow$ restore v1 создает v4 с хэшем v1, неизменяемость истории, ChangeLog RESTORE, реактивация удаленного файла, идемпотентный пропуск дубликата для текущей версии);
-- 4 комплексных E2E-сценария `RestoreE2ETests` (полный сквозной цикл восстановления на реальных сокетах с проверкой отсутствия v5 от наблюдателя, защита несохраненных локальных правок через pre-backup, удаление с последующим восстановлением, и браузерные запросы метаданных через Gateway).
+### Структура тестового набора (171 тест):
+- **Unit-тесты (113 тестов):**
+  - Protocol v1 фрейминг, валидаторы заголовков и фрагментированные TCP-потоки;
+  - `ProtocolPathValidator` — защита от path traversal, абсолютных путей, UNC, спецсимволов;
+  - Бизнес-логика `MetadataApplicationService` — идемпотентность `CommitVersion`, логическое удаление, переименования;
+  - `FileStorageService` и `StorageKeyHelper` — детерминированные ключи, инкрементальный SHA-256;
+  - `RestoreSuppressionService` — подавление эхо-событий наблюдателя;
+  - Фоновые воркеры очистки `PendingOperationsCleanupWorker` и `StorageTempCleanupWorker`;
+  - Диагностический верификатор целостности `StorageConsistencyVerifier`.
+- **Интеграционные тесты (50 тестов):**
+  - TCP-сокеты метаданных и физического хранилища;
+  - Оркестрация `SyncGateway` со streaming relay;
+  - Отказоустойчивость: жизненный цикл Client Reconnect с backoff;
+  - Изоляция нескольких одновременных клиентов на одном шлюзе (`MultipleClientsTests`);
+  - Потоковая передача больших файлов 32 MiB (`LargeFileStreamingTests`);
+  - Восстановление после перезапуска и офлайн-модификаций (`RestartRecoveryTests`).
+- **Комплексные сквозные E2E тесты (8 тестов):**
+  - Полный жизненный цикл автоматической синхронизации директории;
+  - Сквозной цикл восстановления версии с pre-backup защитой несохраненных правок;
+  - Финальный детерминированный сценарий демонстрации `FinalDemoE2ETests` (фазы A—H, 29 шагов).
 
 ---
 
-## 5. Сетевые порты сервисов
+## 8. Порядок запуска сервисов (Run)
 
-| Сервис | Протокол | Хост / Адрес | Назначение |
-| :--- | :--- | :--- | :--- |
-| **PostgreSQL** | TCP | `127.0.0.1:5432` | Хранилище метаданных (`backup_system`) |
-| **Backup.MetadataService** | TCP (Protocol v1) | `127.0.0.1:5001` | Микросервис метаданных и версионирования |
-| **Backup.StorageService** | TCP (Protocol v1) | `127.0.0.1:5002` | Сервис физического хранения файлов |
-| **Backup.SyncGateway** | TCP (Protocol v1) | `127.0.0.1:5000` | Внешний шлюз синхронизации и оркестратор |
-| **Backup.Client.Web** | HTTP (Blazor Server) | `http://localhost:5100` | Локальный веб-интерфейс клиента |
-
----
-
-## 6. Запуск сервисов
-
-Сервисы запускаются в отдельных терминалах в следующем порядке:
+Запуск осуществляется в **четырех отдельных терминалах PowerShell** из корня репозитория:
 
 ### Терминал 1: Сервис метаданных (MetadataService)
 ```powershell
 dotnet run --project src/Backup.MetadataService
 ```
-*Ожидаемый лог:*
+*Ожидаемый вывод:*
 ```text
 info: Backup.MetadataService.MetadataServerWorker[0]
       [MetadataService] Listening on 127.0.0.1:5001
@@ -128,7 +176,7 @@ info: Backup.MetadataService.MetadataServerWorker[0]
 ```powershell
 dotnet run --project src/Backup.StorageService
 ```
-*Ожидаемый лог:*
+*Ожидаемый вывод:*
 ```text
 info: Backup.StorageService.StorageServerWorker[0]
       [StorageService] Listening on 127.0.0.1:5002
@@ -138,7 +186,7 @@ info: Backup.StorageService.StorageServerWorker[0]
 ```powershell
 dotnet run --project src/Backup.SyncGateway
 ```
-*Ожидаемый лог:*
+*Ожидаемый вывод:*
 ```text
 info: Backup.SyncGateway.GatewayServerWorker[0]
       [SyncGateway] MetadataService handshake OK
@@ -148,18 +196,67 @@ info: Backup.SyncGateway.GatewayServerWorker[0]
       [SyncGateway] Listening on 127.0.0.1:5000
 ```
 
-### Терминал 4: Локальный веб-клиент (Client.Web)
+### Терминал 4: Клиентский веб-интерфейс (Client.Web)
 ```powershell
 dotnet run --project src/Backup.Client.Web
 ```
+*Ожидаемый вывод:*
+```text
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://localhost:5100
+```
+
 Веб-интерфейс доступен по адресу: **http://localhost:5100**
 
 ---
 
-## 7. Остановка Docker-контейнера
+## 9. Пошаговый сценарий демонстрации (Demo Walkthrough)
 
-После завершения работы для остановки контейнера без удаления данных выполните:
-```powershell
-docker compose stop
-```
-*(Не используйте флаг `-v`, чтобы не удалить том `backup_system_postgres_data` с данными).*
+1. Откройте в браузере `http://localhost:5100`.
+2. Создайте тестовую папку на диске, например `C:\demo_sync` (или любую изолированную директорию).
+3. На главной странице (`/`) введите имя набора (например, `DemoSet`) и абсолютный путь к папке. Нажмите **«Создать / Выбрать профиль»**.
+4. Нажмите **«Старт синхронизации»**.
+5. Создайте в тестовой папке файл `test.txt` с текстом `Version 1`.
+6. В течение секунды файл синхронизируется. В интерфейсе на странице `/files` появится запись о файле с версией 1.
+7. Отредактируйте файл `test.txt`, изменив текст на `Version 2`. В интерфейсе версия обновится до 2.
+8. Перейдите на страницу ревизий `/files/{id}`: отображаются версии 1 и 2.
+9. Нажмите кнопку **«Восстановить»** напротив Версии 1 и подтвердите действие.
+10. Содержимое файла `test.txt` на диске мгновенно возвращается к состоянию `Version 1`. В системе создается новая неизменяемая версия 3 (`RESTORE`), защищающая целостность цепочки версий.
+11. Перейдите на страницу `/history` и проверьте записи журнала аудита: `CREATE`, `MODIFY`, `RESTORE`.
+
+---
+
+## 10. Диагностика и устранение неполадок (Troubleshooting)
+
+- **Ошибка `METADATA_UNAVAILABLE`:**
+  - Проверьте, запущен ли Терминал 1 (`Backup.MetadataService`) и свободен ли порт `5001`.
+  - Проверьте доступность PostgreSQL на порту `5432`.
+- **Ошибка `STORAGE_UNAVAILABLE`:**
+  - Проверьте, запущен ли Терминал 2 (`Backup.StorageService`) и доступен ли каталог `data/storage`.
+- **Клиент отображает статус шлюза `Offline`:**
+  - Проверьте, запущен ли Терминал 3 (`Backup.SyncGateway`). При восстановлении работы шлюза клиент автоматически выполнит reconnect и запустит реконсиляцию.
+- **Ошибки блокировки файлов (`File locked by another process`):**
+  - Приложение использует `FileStabilityHelper` с автоматическими повторными попытками. Если файл долго занят внешним редактором, операция откладывается без падения клиента, выставляя флаг `ReconciliationRequired`.
+
+---
+
+## 11. Расположение данных (Data Locations)
+
+- `data/client/client-state.json` — локальный идентификатор зарегистрированной рабочей станции (`ClientId`).
+- `data/client/sync-profile.json` — настройки активного набора синхронизации и локального пути.
+- `data/client/index/{BackupSetId}.json` — локальный кеш контрольных сумм файлов для быстрого сканирования.
+- `data/storage/.tmp/{OpId}.part` — временные файлы незавершенных загрузок (автоматически очищаются).
+- `data/storage/clients/{clientId}/.../versions/{version}.bin` — постоянные неизменяемые блобы версий файлов.
+- База данных PostgreSQL (`backup_system`) — таблицы метаданных, версий, наборов и журнала аудита.
+
+---
+
+## 12. Что намеренно не входит в рамки v1 (Scope Exclusions)
+
+В соответствии с техническим заданием и учебным форматом курсового проекта следующие компоненты намеренно оставлены за пределами текущей реализации:
+- Автоматическое удаление зафиксированных физических блобов («Orphan Committed Blobs») при отсутствии ссылок в метаданных — во избежание безвозвратной потери данных при сетевых тайм-аутах;
+- Мультиплексирование параллельных логических потоков внутри одного TCP-соединения (используется модель одно соединение — одна последовательная сессия);
+- Брокеры сообщений (RabbitMQ, Kafka) и внешние распределенные кэши (Redis);
+- Распределенный двухфазный коммит (2PC) — заменен надежным Staged Workflow (`Prepare` -> `Store` -> `Commit`);
+- Протокольное шифрование TLS и авторизация пользователей;
+- Дельта-компрессия и поблочная дедупликация на уровне чанков.
