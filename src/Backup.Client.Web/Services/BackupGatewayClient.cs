@@ -127,9 +127,108 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         return result ?? new CreateBackupSetResponse { Success = false, ErrorMessage = "Empty CreateBackupSet response." };
     }
 
+    public async Task<SyncPlanResponse> SendManifestAsync(
+        ManifestRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+
+        var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.Manifest, request, cancellationToken: cancellationToken);
+        var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+        if (respHeader == null)
+        {
+            throw new ProtocolException("Remote host closed TCP connection.");
+        }
+
+        if (respHeader.MessageType == MessageType.Error)
+        {
+            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+            return new SyncPlanResponse
+            {
+                Success = false,
+                ErrorMessage = err?.Message ?? "Manifest failed."
+            };
+        }
+
+        if (respHeader.MessageType != MessageType.SyncPlan)
+        {
+            throw new ProtocolException($"Expected SyncPlan, but received '{respHeader.MessageType}'.");
+        }
+
+        var result = await _reader.ReadJsonBodyAsync<SyncPlanResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+        return result ?? new SyncPlanResponse { Success = false, ErrorMessage = "Empty SyncPlan response." };
+    }
+
+    public async Task<FileDeletedResponse> DeleteFileAsync(
+        FileDeletedRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+
+        var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.FileDeleted, request, cancellationToken: cancellationToken);
+        var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+        if (respHeader == null)
+        {
+            throw new ProtocolException("Remote host closed TCP connection.");
+        }
+
+        if (respHeader.MessageType == MessageType.Error)
+        {
+            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+            return new FileDeletedResponse
+            {
+                Success = false,
+                ErrorMessage = err?.Message ?? "File deletion failed."
+            };
+        }
+
+        if (respHeader.MessageType != MessageType.FileDeleted)
+        {
+            throw new ProtocolException($"Expected FileDeleted response, but received '{respHeader.MessageType}'.");
+        }
+
+        var result = await _reader.ReadJsonBodyAsync<FileDeletedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+        return result ?? new FileDeletedResponse { Success = false, ErrorMessage = "Empty FileDeleted response." };
+    }
+
+    public async Task<FileRenamedResponse> RenameFileAsync(
+        FileRenamedRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
+
+        var header = await _writer.WriteJsonFrameAsync(_stream!, MessageType.FileRenamed, request, cancellationToken: cancellationToken);
+        var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+        if (respHeader == null)
+        {
+            throw new ProtocolException("Remote host closed TCP connection.");
+        }
+
+        if (respHeader.MessageType == MessageType.Error)
+        {
+            var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+            return new FileRenamedResponse
+            {
+                Success = false,
+                ErrorMessage = err?.Message ?? "File rename failed."
+            };
+        }
+
+        if (respHeader.MessageType != MessageType.FileRenamed)
+        {
+            throw new ProtocolException($"Expected FileRenamed response, but received '{respHeader.MessageType}'.");
+        }
+
+        var result = await _reader.ReadJsonBodyAsync<FileRenamedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+        return result ?? new FileRenamedResponse { Success = false, ErrorMessage = "Empty FileRenamed response." };
+    }
+
     /// <summary>
     /// Executes the full E2E backup workflow for a single local file:
-    /// 1. Computes streaming hash and length.
+    /// 1. Computes streaming hash and length (or uses precomputed).
     /// 2. Sends FileChanged frame to Gateway.
     /// 3. If UploadRequired=false, completes immediately.
     /// 4. If UploadRequired=true, opens FileStream and sends UploadFile binary frame.
@@ -140,7 +239,9 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         string normalizedRelativePath,
         string absoluteFilePath,
         Guid? clientId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? precomputedSha256 = null,
+        long? precomputedSize = null)
     {
         if (!File.Exists(absoluteFilePath))
         {
@@ -155,8 +256,10 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         await EnsureConnectedAsync(cancellationToken);
 
         // 1. Calculate length and streaming SHA-256
-        long fileLength = FileStreamingHelper.GetFileLength(absoluteFilePath);
-        string sha256 = await FileStreamingHelper.ComputeFileSha256Async(absoluteFilePath, cancellationToken);
+        long fileLength = precomputedSize ?? FileStreamingHelper.GetFileLength(absoluteFilePath);
+        string sha256 = !string.IsNullOrWhiteSpace(precomputedSha256)
+            ? precomputedSha256
+            : await FileStreamingHelper.ComputeFileSha256Async(absoluteFilePath, cancellationToken);
 
         var changeReq = new FileChangeRequest
         {

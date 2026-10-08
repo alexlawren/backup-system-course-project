@@ -7,4 +7,6 @@ public class FileMetadataDto
     public int CurrentVersionNumber { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime UpdatedAtUtc { get; set; }
+    public long? CurrentSize { get; set; }
+    public string? CurrentSha256 { get; set; }
 }

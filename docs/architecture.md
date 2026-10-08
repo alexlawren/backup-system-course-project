@@ -240,7 +240,7 @@ data/
      |--- 5. Binary UploadFile ------>|                                |                             |
      |    (Socket Stream)             |--- 6. StoreFileDescriptor ---------------------------------->|
      |                                |<-- 7. StoreFileReady ----------------------------------------|
-     |                                |--- 8. Relay Binary Stream (Zero-Copy Bounded Stream) ------->|
+     |                                |--- 8. Relay Binary Stream (Streaming Relay, 64 KiB buffer) ->|
      |                                |                                |                             |-- Streaming write to .tmp
      |                                |                                |                             |-- SHA-256 incremental verify
      |                                |                                |                             |-- Atomic File.Move
@@ -310,9 +310,9 @@ public Guid OperationId { get; set; }
 
 ---
 
-### 7.7. Потоковый ретранслятор Gateway (Zero-Copy Streaming Relay)
-Шлюз `SyncGateway` не буферизует файл целиком в оперативную память и не создает промежуточных копий на жестком диске.
-Используется обертка `BoundedReadStream`, ограничивающая поток чтения ровно `header.BodyLength` байтами. Поток сокета клиента передается напрямую в `StorageServiceClient.StoreFileAsync`, который пересылает данные чанками по 64 KiB в сокет `StorageService`.
+### 7.7. Потоковый ретранслятор Gateway (Streaming Relay without Full-File Buffering)
+Шлюз `SyncGateway` не буферизует файл целиком в оперативную память и не создает промежуточных копий на жестком диске шлюза.
+Используется обертка `BoundedReadStream`, ограничивающая поток чтения ровно `header.BodyLength` байтами. Передача между клиентом и `StorageService` выполняется в потоковом режиме с ограниченным буфером в пространстве пользователя (64 KiB чанки), без сохранения файла на диск шлюза (streaming relay without full-file buffering or intermediate Gateway file). Это не является аппаратным OS zero-copy (так как данные проходят через ограниченный пользовательский буфер процесса), но обеспечивает минимальный и константный $O(1)$ расход оперативной памяти независимо от размера файла.
 
 ---
 
@@ -322,3 +322,119 @@ public Guid OperationId { get; set; }
 - Попытка отправить второй запрос `FileChanged` до завершения активной загрузки отклоняется с кодом `UPLOAD_IN_PROGRESS`.
 - Попытка передать бинарный кадр `UploadFile` без предварительного `UploadRequired` отклоняется с кодом `UPLOAD_NOT_EXPECTED`.
 - Параллельные клиенты обслуживаются независимо без взаимного влияния.
+
+---
+
+## 8. Change-set #5: Автоматическая синхронизация каталогов (Directory Sync & Watcher)
+
+### 8.1. Клиентский конвейер синхронизации (Client Pipeline)
+В Change-set #5 фокус смещен с ручной загрузки одиночного файла на непрерывное резервное копирование выбранного каталога:
+
+```
+[ Локальный каталог ]
+         |
+         v
+[ FileSystemWatcherService ]
+         | (легковесный захват событий без блокировок)
+         v
+[ Channel<InternalFileChangeEvent> ] (потокобезопасная асинхронная очередь)
+         |
+         v
+[ Debounce & Coalescing Engine ] (~750 ms окно схлопывания событий)
+         |
+         v
+[ FileStabilityHelper ] (проверка снятия файловых блокировок)
+         |
+         v
+[ SyncEngine ] <====================> [ LocalFileIndexService ]
+         |                                  (локальный кеш SHA-256)
+         v
+[ BackupGatewayClient ]
+         | (TCP Protocol v1)
+         v
+   [ SyncGateway ]
+```
+
+### 8.2. Один активный профиль синхронизации в v1 (Single Active Profile)
+Клиентская часть `Backup.Client.Web` поддерживает работу с **одним активно отслеживаемым BackupSet** одновременно.
+- Профиль сохраняется в файле: `data/client/sync-profile.json`.
+- Модель: `BackupSetId`, `Name`, `LocalRootPath`, `AutomaticSyncEnabled`.
+- Персистентность: строго атомарная запись через запись во временный файл (`.tmp.{Guid}`) и атомарную замену `File.Move(temp, target, overwrite: true)`.
+- Состояние профиля **не хранится** в `localStorage` браузера.
+
+### 8.3. Локальный кеш индексов (Local File Index Cache)
+Хранится в `data/client/index/{BackupSetId}.json`.
+- Запись для каждого файла: `RelativePath`, `Size`, `LastWriteTimeUtc`, `Sha256`.
+- Роль кеша: исключительно оптимизация клиентского сканирования; кеш **не является** авторитетным состоянием сервера.
+- При сканировании директории:
+  - Если `Size == cached.Size` и `LastWriteTimeUtc == cached.LastWriteTimeUtc`: повторно используется вычисленный ранее `Sha256`.
+  - Иначе: выполняется потоковый пересчет `Sha256` через `FileStreamingHelper`.
+- Устойчивость к сбоям: если кеш отсутствует или поврежден (битый JSON), он безопасно перестраивается с нуля без падения приложения.
+- При удалении локального файла запись автоматически удаляется из индекса.
+
+### 8.4. Сканер директорий и безопасность путей (Directory Scanner & Path Safety)
+- Рекурсивно обходит `LocalRootPath` в потоковом режиме без загрузки тел файлов в память.
+- Пустые директории в Protocol v1 не резервируются (резервируются только файлы).
+- **Безопасность путей:**
+  - Каждый относительный путь валидируется через `ProtocolPathValidator` (запрет `..`, обратных слешей, ведущих слешей, двоеточий, зарезервированных имен Windows).
+  - Проверка принадлежности: канонический `Path.GetFullPath(file)` обязан начинаться с канонического `LocalRootPath`.
+  - Защита от симлинков/reparse points: сканер не углубляется в поддиректории с атрибутом `FileAttributes.ReparsePoint` (junctions/symlinks), что предотвращает зацикливание и выход за пределы корня набора.
+
+### 8.5. Согласование манифеста и построение плана (Manifest -> SyncPlan)
+1. Клиент строит и отправляет кадр `ManifestRequest` (`MessageType.Manifest`):
+   - `ClientId`, `BackupSetId`, `Files` (`RelativePath`, `Size`, `LastWriteTimeUtc`, `Sha256`).
+2. Gateway запрашивает снимок сервера у `MetadataService` единым SQL-запросом (`GetFilesAsync` с `IncludeDeleted = true`), возвращающим текущую версию, размер и SHA-256 каждого файла без N+1 запросов.
+3. Gateway сравнивает локальный манифест со снимком сервера по правилам:
+   - LOCAL exists, SERVER missing $\rightarrow$ `UPLOAD NEW`
+   - LOCAL exists, SERVER `IsDeleted == true` $\rightarrow$ `UPLOAD SERVER_DELETED`
+   - LOCAL exists, SERVER active, hash differs $\rightarrow$ `UPLOAD CHANGED`
+   - LOCAL exists, SERVER active, hash same $\rightarrow$ `UNCHANGED`
+   - LOCAL missing, SERVER active $\rightarrow$ `DELETE`
+   - LOCAL missing, SERVER already deleted $\rightarrow$ ничего не делать
+4. Gateway возвращает клиенту кадр `SyncPlanResponse` (`MessageType.SyncPlan`), содержащий детерминированно отсортированные списки `Upload` и `Delete`, а также счетчик `UnchangedCount`.
+5. Клиент последовательно исполняет план.
+
+### 8.6. Алгоритм начальной реконсиляции (Initial Reconciliation)
+Для предотвращения race condition между сканированием и стартом отслеживания:
+1. Проверка существования `LocalRootPath`.
+2. Запуск `FileSystemWatcher` в режиме накопления очереди (события, происходящие во время сканирования, уже попадают в канал).
+3. Сканирование каталога и построение манифеста.
+4. Отправка манифеста на Gateway и получение `SyncPlan`.
+5. Последовательное выполнение Upload операций через `BackupGatewayClient.BackupFileAsync`.
+6. Последовательное выполнение Delete операций через `BackupGatewayClient.DeleteFileAsync`.
+7. Сохранение обновленного `LocalFileIndex`.
+8. Переход в нормальный режим обработки наблюдателя: background loop вычитывает и обрабатывает события, накопившиеся во время начального сканирования.
+
+### 8.7. Обработка событий наблюдателя и дебаунс (Debounce & Coalescing)
+- FileSystemWatcher генерирует всплески событий на одно физическое сохранение файла.
+- Background processor объединяет события по относительному пути с конфигурируемым окном ожидания (по умолчанию 750 мс):
+  - Множественные `Changed` $\rightarrow$ один логический `Changed`.
+  - `Created` + `Changed` $\rightarrow$ один логический `Created`.
+  - `Renamed(old -> new)` + `Changed(new)` $\rightarrow$ сохранение как `Renamed`.
+  - `Created` затем сразу `Deleted` до истечения таймера $\rightarrow$ полное удаление из очереди (upsert отменяется).
+- **Файловые блокировки (Locks):** перед чтением файла `FileStabilityHelper` выполняет неблокирующие асинхронные попытки открытия потока (`FileAccess.Read`, `FileShare.Read`) с задержкой через `Task.Delay`. Если файл заблокирован внешним процессом/редактором дольше допустимого, операция откладывается и выставляется флаг `ReconciliationRequired = true` без падения сервиса.
+
+### 8.8. Исправление семантики повторно созданных удаленных файлов (Reappearing Deleted File)
+В `MetadataApplicationService.PrepareVersionAsync` исправлена критическая ошибка:
+- Если файл имеет `IsDeleted == true` и локально создается заново с тем же содержимым (совпадающим SHA-256):
+  - Сервис **обязан** вернуть `UploadRequired = true` (а не `false`).
+  - Новая версия получает номер `CurrentVersionNumber + 1`.
+  - При `CommitVersion` флаг сбрасывается в `IsDeleted = false`, а в `ChangeLog` фиксируется создание/модификация версии.
+
+### 8.9. Потоки удаления и переименования (Delete & Rename Flows)
+- **Удаление:** Клиент отправляет `FileDeletedRequest` $\rightarrow$ Gateway вызывает `DeleteFileMetadata` $\rightarrow$ файл помечается `IsDeleted = true`, в `ChangeLog` пишется `DELETE`. Исторические блобы в `StorageService` не удаляются. Запись удаляется из `LocalFileIndex`. Повторный DELETE обрабатывается идемпотентно.
+- **Переименование:** Клиент отправляет `FileRenamedRequest` $\rightarrow$ Gateway вызывает `RenameFileMetadata`.
+  - Физические файлы версий не перемещаются; `FileId` и история версий сохраняются.
+  - Если `OldRelativePath` известен в локальном индексе: выполняется `RenameFileMetadata`.
+  - Если старый путь неизвестен (например, временный файл редактора переименован в целевой файл): новый путь обрабатывается как обычный upsert.
+
+### 8.10. Переполнение буфера наблюдателя и сбои сети
+- При получении события `FileSystemWatcher.Error` (включая `InternalBufferOverflowException`) или сетевом сбое во время live-синхронизации:
+  - Выставляется флаг `ReconciliationRequired = true`.
+  - Приложение не падает.
+  - При стабилизации соединения или по расписанию автоматически запускается полная реконсиляция по манифесту.
+
+### 8.11. Ограничения Protocol v1
+1. **Офлайн-переименование:** Если файл был переименован, пока клиент `Backup.Client.Web` был выключен, при последующем запуске начальная реконсиляция манифеста зафиксирует это как `DELETE old` + `UPLOAD new` (будет создан новый `FileId`). Живое переименование через работающий FileSystemWatcher сохраняет `FileId` и всю историю.
+2. **Пустые директории:** Пустые каталоги не пересылаются и не резервируются в v1 (отслеживаются только файлы).
+

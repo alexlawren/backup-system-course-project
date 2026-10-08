@@ -789,6 +789,31 @@ internal class FakeMetadataServiceClient : IMetadataServiceClient
             : Task.FromResult(new CommitVersionResponse { Success = true, VersionNumber = 1, StorageKey = request.StorageKey });
     }
 
+    public Func<DeleteFileMetadataRequest, Task<DeleteFileMetadataResponse>>? DeleteFileMetadataFunc { get; set; }
+    public Func<RenameFileMetadataRequest, Task<RenameFileMetadataResponse>>? RenameFileMetadataFunc { get; set; }
+    public Func<GetFilesRequest, Task<GetFilesResponse>>? GetFilesFunc { get; set; }
+
+    public Task<DeleteFileMetadataResponse> DeleteFileMetadataAsync(DeleteFileMetadataRequest request, CancellationToken cancellationToken = default)
+    {
+        return DeleteFileMetadataFunc != null
+            ? DeleteFileMetadataFunc(request)
+            : Task.FromResult(new DeleteFileMetadataResponse { Success = true, FileId = Guid.NewGuid() });
+    }
+
+    public Task<RenameFileMetadataResponse> RenameFileMetadataAsync(RenameFileMetadataRequest request, CancellationToken cancellationToken = default)
+    {
+        return RenameFileMetadataFunc != null
+            ? RenameFileMetadataFunc(request)
+            : Task.FromResult(new RenameFileMetadataResponse { Success = true, FileId = Guid.NewGuid() });
+    }
+
+    public Task<GetFilesResponse> GetFilesAsync(GetFilesRequest request, CancellationToken cancellationToken = default)
+    {
+        return GetFilesFunc != null
+            ? GetFilesFunc(request)
+            : Task.FromResult(new GetFilesResponse { Success = true, BackupSetId = request.BackupSetId });
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 

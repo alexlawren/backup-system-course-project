@@ -87,6 +87,18 @@ public class GatewaySessionHandler : IAsyncDisposable
                 await HandleUploadFileAsync(stream, header, cancellationToken);
                 break;
 
+            case MessageType.Manifest:
+                await HandleManifestAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.FileDeleted:
+                await HandleFileDeletedAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.FileRenamed:
+                await HandleFileRenamedAsync(stream, header, cancellationToken);
+                break;
+
             default:
                 _logger.LogWarning("[SyncGateway] Unhandled MessageType: {MessageType}", header.MessageType);
                 if (header.BodyLength > 0)
@@ -494,6 +506,260 @@ public class GatewaySessionHandler : IAsyncDisposable
             ErrorCode = BackupErrorCodes.MetadataCommitUncertain,
             ErrorMessage = "Physical file was stored, but metadata commit could not be confirmed after multiple retries."
         };
+    }
+
+    private async Task HandleManifestAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<ManifestRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.SyncPlan,
+                new SyncPlanResponse { Success = false, ErrorMessage = "Manifest body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.BackupSetId == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.SyncPlan,
+                new SyncPlanResponse { Success = false, ErrorMessage = "BackupSetId cannot be empty." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.ClientId != Guid.Empty)
+        {
+            if (_session.ClientId == null)
+            {
+                _session.ClientId = request.ClientId;
+            }
+            else if (_session.ClientId != request.ClientId)
+            {
+                _logger.LogWarning("[SyncGateway] ClientId mismatch in Manifest. Session: {SessionClientId}, Request: {ReqClientId}", _session.ClientId, request.ClientId);
+            }
+        }
+
+        try
+        {
+            var serverSnapshot = await _metadataClient.GetFilesAsync(
+                new GetFilesRequest { BackupSetId = request.BackupSetId, IncludeDeleted = true },
+                cancellationToken);
+
+            if (!serverSnapshot.Success)
+            {
+                await _writer.WriteJsonFrameAsync(stream, MessageType.SyncPlan,
+                    new SyncPlanResponse { Success = false, ErrorMessage = $"Failed to get server files: {serverSnapshot.ErrorMessage}" },
+                    correlationId: header.MessageId, cancellationToken: cancellationToken);
+                return;
+            }
+
+            var serverFilesDict = serverSnapshot.Files
+                .ToDictionary(f => f.RelativePath, f => f, StringComparer.OrdinalIgnoreCase);
+
+            var uploadList = new List<SyncPlanUploadItem>();
+            var deleteList = new List<string>();
+            int unchangedCount = 0;
+            var localPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (request.Files != null)
+            {
+                foreach (var localFile in request.Files)
+                {
+                    if (!ProtocolPathValidator.TryNormalizeAndValidate(localFile.RelativePath, out var normLocalPath, out _))
+                    {
+                        continue;
+                    }
+
+                    localPaths.Add(normLocalPath);
+
+                    if (!serverFilesDict.TryGetValue(normLocalPath, out var serverFile))
+                    {
+                        // LOCAL exists, SERVER missing -> UPLOAD NEW
+                        uploadList.Add(new SyncPlanUploadItem
+                        {
+                            RelativePath = normLocalPath,
+                            Reason = SyncPlanReasons.New
+                        });
+                    }
+                    else if (serverFile.IsDeleted)
+                    {
+                        // LOCAL exists, SERVER IsDeleted == true -> UPLOAD SERVER_DELETED
+                        uploadList.Add(new SyncPlanUploadItem
+                        {
+                            RelativePath = normLocalPath,
+                            Reason = SyncPlanReasons.ServerDeleted
+                        });
+                    }
+                    else
+                    {
+                        // LOCAL exists, SERVER active
+                        bool hashMatches = !string.IsNullOrWhiteSpace(serverFile.CurrentSha256) &&
+                                           string.Equals(serverFile.CurrentSha256, localFile.Sha256, StringComparison.OrdinalIgnoreCase);
+
+                        if (hashMatches)
+                        {
+                            unchangedCount++;
+                        }
+                        else
+                        {
+                            uploadList.Add(new SyncPlanUploadItem
+                            {
+                                RelativePath = normLocalPath,
+                                Reason = SyncPlanReasons.Changed
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Server files not present locally
+            foreach (var (serverPath, serverFile) in serverFilesDict)
+            {
+                if (!localPaths.Contains(serverPath))
+                {
+                    if (!serverFile.IsDeleted)
+                    {
+                        deleteList.Add(serverPath);
+                    }
+                }
+            }
+
+            var syncPlan = new SyncPlanResponse
+            {
+                BackupSetId = request.BackupSetId,
+                Upload = uploadList.OrderBy(u => u.RelativePath, StringComparer.Ordinal).ToList(),
+                Delete = deleteList.OrderBy(d => d, StringComparer.Ordinal).ToList(),
+                UnchangedCount = unchangedCount,
+                Success = true
+            };
+
+            _logger.LogInformation("[SyncGateway] Manifest processed for BackupSet {BackupSetId}: {UploadCount} to upload, {DeleteCount} to delete, {UnchangedCount} unchanged",
+                request.BackupSetId, syncPlan.Upload.Count, syncPlan.Delete.Count, syncPlan.UnchangedCount);
+
+            await _writer.WriteJsonFrameAsync(stream, MessageType.SyncPlan, syncPlan, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to build SyncPlan for BackupSet {BackupSetId}", request.BackupSetId);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.SyncPlan,
+                new SyncPlanResponse { Success = false, ErrorMessage = $"SyncGateway error: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleFileDeletedAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<FileDeletedRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileDeleted,
+                new FileDeletedResponse { Success = false, ErrorMessage = "FileDeleted body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.BackupSetId == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileDeleted,
+                new FileDeletedResponse { Success = false, ErrorMessage = "BackupSetId cannot be empty." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (!ProtocolPathValidator.TryNormalizeAndValidate(request.RelativePath, out var normalizedPath, out var pathError))
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileDeleted,
+                new FileDeletedResponse { Success = false, ErrorMessage = pathError },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var delResp = await _metadataClient.DeleteFileMetadataAsync(new DeleteFileMetadataRequest
+            {
+                BackupSetId = request.BackupSetId,
+                RelativePath = normalizedPath
+            }, cancellationToken);
+
+            var response = new FileDeletedResponse
+            {
+                FileId = delResp.FileId,
+                Success = delResp.Success,
+                ErrorMessage = delResp.ErrorMessage
+            };
+
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileDeleted, response, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Error handling FileDeleted for '{Path}'", normalizedPath);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileDeleted,
+                new FileDeletedResponse { Success = false, ErrorMessage = ex.Message },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleFileRenamedAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<FileRenamedRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed,
+                new FileRenamedResponse { Success = false, ErrorMessage = "FileRenamed body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.BackupSetId == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed,
+                new FileRenamedResponse { Success = false, ErrorMessage = "BackupSetId cannot be empty." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (!ProtocolPathValidator.TryNormalizeAndValidate(request.OldRelativePath, out var oldNormalized, out var oldError))
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed,
+                new FileRenamedResponse { Success = false, ErrorMessage = $"Old path error: {oldError}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (!ProtocolPathValidator.TryNormalizeAndValidate(request.NewRelativePath, out var newNormalized, out var newError))
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed,
+                new FileRenamedResponse { Success = false, ErrorMessage = $"New path error: {newError}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var renResp = await _metadataClient.RenameFileMetadataAsync(new RenameFileMetadataRequest
+            {
+                BackupSetId = request.BackupSetId,
+                OldRelativePath = oldNormalized,
+                NewRelativePath = newNormalized
+            }, cancellationToken);
+
+            var response = new FileRenamedResponse
+            {
+                FileId = renResp.FileId,
+                Success = renResp.Success,
+                ErrorMessage = renResp.ErrorMessage
+            };
+
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed, response, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Error handling FileRenamed for '{OldPath}' -> '{NewPath}'", oldNormalized, newNormalized);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FileRenamed,
+                new FileRenamedResponse { Success = false, ErrorMessage = ex.Message },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
     }
 
     private static async Task DrainRemainingAsync(Stream stream, long remainingBytes, CancellationToken cancellationToken)

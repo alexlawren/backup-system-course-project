@@ -175,7 +175,7 @@ public class MetadataApplicationService : IMetadataApplicationService
         }
 
         // 3. If current committed version exists and Sha256 matches, no upload required
-        if (file.CurrentVersionNumber > 0)
+        if (!file.IsDeleted && file.CurrentVersionNumber > 0)
         {
             var committedVersion = await dbContext.FileVersions.FirstOrDefaultAsync(
                 fv => fv.FileId == file.Id && fv.VersionNumber == file.CurrentVersionNumber,
@@ -413,6 +413,12 @@ public class MetadataApplicationService : IMetadataApplicationService
             return new DeleteFileMetadataResponse { Success = false, ErrorMessage = $"File '{normalizedPath}' was not found in BackupSet {request.BackupSetId}." };
         }
 
+        if (file.IsDeleted)
+        {
+            _logger.LogInformation("[MetadataService] DeleteFileMetadata: File '{Path}' is already marked as deleted (Idempotent)", normalizedPath);
+            return new DeleteFileMetadataResponse { FileId = file.Id, Success = true };
+        }
+
         await using var tx = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         try
         {
@@ -552,7 +558,15 @@ public class MetadataApplicationService : IMetadataApplicationService
                 RelativePath = f.RelativePath,
                 CurrentVersionNumber = f.CurrentVersionNumber,
                 IsDeleted = f.IsDeleted,
-                UpdatedAtUtc = f.UpdatedAtUtc
+                UpdatedAtUtc = f.UpdatedAtUtc,
+                CurrentSize = f.Versions
+                    .Where(v => v.VersionNumber == f.CurrentVersionNumber)
+                    .Select(v => (long?)v.Size)
+                    .FirstOrDefault(),
+                CurrentSha256 = f.Versions
+                    .Where(v => v.VersionNumber == f.CurrentVersionNumber)
+                    .Select(v => v.Sha256)
+                    .FirstOrDefault()
             })
             .ToListAsync(cancellationToken);
 

@@ -309,3 +309,98 @@ Gateway (Client)                                          StorageService
 | `SIZE_MISMATCH` | Количество переданных байт не совпало с `header.BodyLength` или заявленным размером. |
 | `HASH_MISMATCH` | Контрольная сумма SHA-256 записанных данных не совпала с заявленным хэшем. |
 | `STORAGE_CONFLICT` | В хранилище уже существует версия с другим содержимым под данным ключом. |
+
+---
+
+## 7. Контракты автоматической синхронизации и манифестов (Change-set #5)
+
+### 7.1. Кадр `Manifest` (Клиент -> Gateway)
+Кадр с управляющим JSON-телом (`MessageType.Manifest`):
+```json
+{
+  "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "files": [
+    {
+      "relativePath": "docs/readme.txt",
+      "size": 1024,
+      "lastWriteTimeUtc": "2026-10-08T10:00:00Z",
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "relativePath": "images/logo.png",
+      "size": 20480,
+      "lastWriteTimeUtc": "2026-10-08T10:15:00Z",
+      "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    }
+  ]
+}
+```
+
+### 7.2. Кадр `SyncPlan` (Gateway -> Клиент)
+Кадр ответа со сформированным планом действий (`MessageType.SyncPlan`):
+```json
+{
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "upload": [
+    {
+      "relativePath": "docs/readme.txt",
+      "reason": "CHANGED"
+    },
+    {
+      "relativePath": "images/logo.png",
+      "reason": "NEW"
+    }
+  ],
+  "delete": [
+    "docs/old_obsolete_draft.txt"
+  ],
+  "unchangedCount": 42,
+  "success": true,
+  "errorMessage": null
+}
+```
+Значения `reason` для элементов загрузки:
+- `"NEW"`: Файл присутствует локально, но отсутствует на сервере.
+- `"CHANGED"`: Файл присутствует на клиенте и сервере, но хэш содержимого различается.
+- `"SERVER_DELETED"`: Файл числился на сервере удаленным (`IsDeleted == true`), но локально вновь создан или существует.
+
+### 7.3. Кадр `FileDeleted` (Клиент -> Gateway)
+Кадр уведомления об удалении файла в реальном времени (`MessageType.FileDeleted`):
+**Запрос (`FileDeletedRequest`):**
+```json
+{
+  "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "relativePath": "docs/obsolete.docx"
+}
+```
+**Ответ (`FileDeletedResponse`):**
+```json
+{
+  "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
+  "success": true,
+  "errorMessage": null
+}
+```
+
+### 7.4. Кадр `FileRenamed` (Клиент -> Gateway)
+Кадр уведомления о переименовании файла в реальном времени (`MessageType.FileRenamed`):
+**Запрос (`FileRenamedRequest`):**
+```json
+{
+  "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "oldRelativePath": "docs/draft.docx",
+  "newRelativePath": "docs/final_report.docx"
+}
+```
+**Ответ (`FileRenamedResponse`):**
+```json
+{
+  "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
+  "success": true,
+  "errorMessage": null
+}
+```
+

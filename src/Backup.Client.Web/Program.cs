@@ -13,6 +13,14 @@ builder.Services.AddSingleton<IClientIdentityService, ClientIdentityService>();
 builder.Services.AddTransient<BackupGatewayClient>();
 builder.Services.AddScoped<IBackupClientService, BackupClientService>();
 
+builder.Services.AddSingleton<ISyncProfileService, SyncProfileService>();
+builder.Services.AddSingleton<ILocalFileIndexService, LocalFileIndexService>();
+builder.Services.AddSingleton<IFileStabilityHelper, FileStabilityHelper>();
+builder.Services.AddSingleton<IDirectoryScanner, DirectoryScanner>();
+builder.Services.AddSingleton<IFileSystemWatcherService, FileSystemWatcherService>();
+builder.Services.AddSingleton<ISyncEngine, SyncEngine>();
+builder.Services.AddHostedService<ClientStartupSyncWorker>();
+
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();

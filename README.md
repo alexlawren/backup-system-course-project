@@ -2,7 +2,7 @@
 
 Курсовой проект по дисциплине «Программирование сетевых приложений».
 
-**Change-set #4:** END-TO-END BACKUP ORCHESTRATION (сквозная оркестрация резервного копирования одиночного файла: `Client.Web` -> `SyncGateway` -> `MetadataService` + `StorageService`. Рабочий процесс `PrepareVersion` -> `UploadRequired` -> binary streaming `UploadFile` через Gateway -> `StoreFile` -> идемпотентный `CommitVersion` с retry -> `UploadCompleted`. Потоковый zero-copy relay на шлюзе, изоляция клиентских сессий, постоянная идентификация клиента в `data/client/client-state.json`, проксирование регистрации и создания наборов через Gateway, минимальный диагностический UI для ручной верификации).
+**Change-set #5:** AUTOMATIC DIRECTORY SYNCHRONIZATION + FILESYSTEMWATCHER + INITIAL MANIFEST RECONCILIATION (переход от ручной отправки одиночного файла к автоматическому резервному копированию каталога: `FileSystemWatcherService` на клиенте, асинхронный канал `Channel<InternalFileChangeEvent>`, дебаунс и коалесценция ~750 мс, начальное согласование `Manifest` -> `SyncPlan` без N+1 запросов к БД, локальный кеш индексов `LocalFileIndexService` с атомарной записью, потоковый `DirectoryScanner` с защитой от симлинков/reparse points, потоки `FileDeleted` и `FileRenamed`, обработка переполнения буфера наблюдателя, исправление бага повторного появления удаленного файла, диагностический UI управления синхронизацией).
 
 ---
 
@@ -72,7 +72,7 @@ dotnet restore
 # Сборка решения
 dotnet build
 
-# Запуск полного набора модульных и интеграционных тестов (110 тестов)
+# Запуск полного набора модульных и интеграционных тестов (136 тестов)
 dotnet test
 ```
 
@@ -84,9 +84,13 @@ dotnet test
 - 12 модульных тестов `FileStorageService` и `StorageKeyHelper` (детерминированный ключ, валидация SHA-256, файлы нулевого размера, защита от path traversal, очистка temp-файлов);
 - 26 интеграционных TCP-тестов физического хранилища (сквозной цикл `StoreFile` -> `StoreFileReady` -> `UploadFile` -> `StoreFileResult`, скачивание `GetStoredFile`, конкурентные клиенты, большие файлы 8 MiB, обнаружение конфликтов и идемпотентность, проверка обрыва соединения);
 - 1 сквозной smoke-тест взаимодействия `Backup.SyncGateway` и `Backup.StorageService`;
-- 13 тестов оркестрации `SyncGateway` (решение `UploadRequired`, изоляция сессий, no interleaving, zero-copy relay, валидация путей, обработка сбоев хранилища, retry при тайм-ауте `CommitVersion`);
-- 2 комплексных E2E-интеграционных теста жизненного цикла резервного копирования v1 $\rightarrow$ v2 и сценария сбоя на реальном кластере;
-- 1 живой интеграционный smoke-тест верификации 4 сервисов.
+- 13 тестов оркестрации `SyncGateway` (решение `UploadRequired`, изоляция сессий, no interleaving, streaming relay без буферизации файла, валидация путей, обработка сбоев хранилища, retry при тайм-ауте `CommitVersion`);
+- 2 комплексных E2E-интеграционных теста жизненного цикла резервного копирования одиночного файла;
+- 1 живой интеграционный smoke-тест верификации 4 сервисов;
+- 9 тестов согласования манифестов `Manifest` $\rightarrow$ `SyncPlan`, снимков сервера без N+1 запросов и исправления семантики возврата удаленного файла (Section 16 & 27);
+- 6 тестов локального кеша индексов `LocalFileIndexService` и сканера (повторное использование хэша, пересчет, битый кеш, удаление файлов, атомарная запись, Section 28);
+- 9 тестов `FileSystemWatcher` и дебаунса (схлопывание `Changed`, `Created` + `Changed`, удаление, переименования, независимость файлов, переполнение буфера, обработка пред-сканированных событий, Section 29);
+- 2 комплексных E2E-теста полного жизненного цикла автоматической синхронизации директории (Create $\rightarrow$ Modify $\rightarrow$ Rename $\rightarrow$ Delete $\rightarrow$ Recreate) и начальной офлайн-реконсиляции на реальном кластере PostgreSQL + Storage + Gateway (Section 30 & 31).
 
 ---
 

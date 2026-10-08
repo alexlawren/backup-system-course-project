@@ -3,14 +3,16 @@
 @using Backup.Client.Web.Services
 @using Backup.Shared.Messages
 @inject IBackupClientService BackupService
+@inject ISyncEngine SyncEngine
+@inject ISyncProfileService ProfileService
 @inject ILogger<Home> Logger
 
-<PageTitle>Backup System - Course Project Diagnostic</PageTitle>
+<PageTitle>Backup System - Directory Synchronization Diagnostic</PageTitle>
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Change-set #4 — E2E Orchestration</div>
-        <h1>Course Project / Backup Test</h1>
+        <div class="badge-tag">Change-set #5 — Automatic Directory Synchronization</div>
+        <h1>Course Project / Directory Sync</h1>
         <p class="subtitle">«Клиент-серверная система резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений»</p>
     </header>
 
@@ -29,19 +31,24 @@
                 </div>
             </div>
 
-            <div class="status-card active">
-                <div class="status-indicator online"></div>
+            <div class="status-card @(SyncEngine.IsRunning ? "active" : "")">
+                <div class="status-indicator @(SyncEngine.IsRunning ? "online" : "pending")"></div>
                 <div class="status-info">
-                    <span class="status-name">Client Web</span>
-                    <span class="status-role">Local Web UI (http://localhost:5100)</span>
-                    <span class="status-badge badge-green">Running</span>
+                    <span class="status-name">Automatic Sync Watcher</span>
+                    <span class="status-role">FileSystemWatcher + Debounce (~750ms)</span>
+                    <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
+                        @(SyncEngine.IsRunning ? "Running" : "Stopped")
+                    </span>
                 </div>
             </div>
         </div>
 
-        <div style="margin-top: 1rem;">
+        <div style="margin-top: 1rem; display: flex; gap: 0.75rem;">
             <button class="btn btn-secondary" @onclick="CheckGatewayConnectionAsync" disabled="@isLoading">
                 <span>🔄 Ping Gateway</span>
+            </button>
+            <button class="btn btn-secondary" @onclick="RefreshStateAsync" disabled="@isLoading">
+                <span>🔄 Refresh UI State</span>
             </button>
         </div>
     </section>
@@ -85,51 +92,102 @@
         </div>
     </section>
 
-    <!-- Backup Set Section -->
+    <!-- Active Backup Set & Profile Management -->
     <section class="card-section">
-        <h2>Backup Set Configuration</h2>
+        <h2>Active Monitored Backup Set & Sync Profile</h2>
         <div class="diagnostic-section">
             <div class="form-row">
                 <div class="form-group">
                     <label class="form-label" for="backupSetName">Backup Set Name:</label>
-                    <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="e.g. MyDocuments" disabled="@isLoading" />
+                    <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="e.g. MyFolder" disabled="@isLoading" />
                 </div>
                 <div class="form-group">
                     <label class="form-label" for="localRootPath">Local Root Directory Path:</label>
-                    <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="e.g. C:\backup_data" disabled="@isLoading" />
+                    <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="e.g. D:\test_backup" disabled="@isLoading" />
                 </div>
             </div>
 
-            <div style="display: flex; gap: 1rem; align-items: center;">
-                <button class="btn btn-primary" @onclick="CreateBackupSetAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
-                    <span>📁 Create Backup Set</span>
+            <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+                <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
+                    <span>📁 Save & Activate Backup Set</span>
                 </button>
             </div>
 
-            @if (activeBackupSetId != Guid.Empty)
-            {
-                <div class="kv-table" style="margin-top: 0.5rem;">
-                    <span class="kv-key">Active Set ID:</span>
-                    <span class="kv-value">@activeBackupSetId</span>
-                </div>
-            }
+            <div class="kv-table" style="margin-top: 1rem;">
+                <span class="kv-key">Active Backup Set ID:</span>
+                <span class="kv-value">@(activeBackupSetId != Guid.Empty ? activeBackupSetId.ToString() : "—")</span>
+
+                <span class="kv-key">Active Directory:</span>
+                <span class="kv-value">@(SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? "—")</span>
+
+                <span class="kv-key">Automatic Sync Status:</span>
+                <span class="kv-value">
+                    <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
+                        @(SyncEngine.IsRunning ? "RUNNING" : "STOPPED")
+                    </span>
+                </span>
+
+                <span class="kv-key">Last Reconciliation:</span>
+                <span class="kv-value">@(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "Never")</span>
+
+                <span class="kv-key">Last Sync Result:</span>
+                <span class="kv-value">@(SyncEngine.LastSyncResult ?? "—")</span>
+
+                <span class="kv-key">Pending Events (Debounce):</span>
+                <span class="kv-value">@SyncEngine.PendingEventCount</span>
+
+                <span class="kv-key">Reconciliation Required:</span>
+                <span class="kv-value" style="color: @(SyncEngine.ReconciliationRequired ? "var(--warning)" : "var(--accent-color)");">
+                    @(SyncEngine.ReconciliationRequired ? "YES (Needs Reconciliation)" : "NO (In Sync)")
+                </span>
+            </div>
+
+            <div style="display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap;">
+                <button class="btn btn-primary" @onclick="StartAutomaticSyncAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || SyncEngine.IsRunning)">
+                    <span>▶️ Start Automatic Sync</span>
+                </button>
+
+                <button class="btn btn-secondary" @onclick="StopAutomaticSyncAsync" disabled="@(isLoading || !SyncEngine.IsRunning)">
+                    <span>⏹️ Stop Automatic Sync</span>
+                </button>
+
+                <button class="btn btn-secondary" @onclick="ReconcileNowAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty)">
+                    <span>⚡ Sync Now (Reconcile)</span>
+                </button>
+            </div>
 
             @if (!string.IsNullOrEmpty(backupSetMessage))
             {
-                <div class="status-badge @(backupSetIsError ? "badge-amber" : "badge-green")">
+                <div class="status-badge @(backupSetIsError ? "badge-amber" : "badge-green")" style="margin-top: 0.75rem;">
                     @backupSetMessage
                 </div>
             }
         </div>
     </section>
 
-    <!-- Manual File Backup Test Section -->
+    <!-- Recent Sync Activity Log -->
     <section class="card-section">
-        <h2>Manual File Backup Test</h2>
-        <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
-            Specify an absolute local file path inside the Local Root Path. Gateway orchestrates: PrepareVersion &rarr; UploadRequired &rarr; streaming UploadFile &rarr; Storage StoreFile &rarr; Metadata CommitVersion.
-        </p>
+        <h2>Recent Synchronization Events (Session Log)</h2>
+        <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 0.75rem; max-height: 250px; overflow-y: auto; font-family: monospace; font-size: 0.85rem;">
+            @if (SyncEngine.RecentEvents.Count == 0)
+            {
+                <span style="color: var(--text-secondary);">No events recorded in current session.</span>
+            }
+            else
+            {
+                @foreach (var log in SyncEngine.RecentEvents.AsEnumerable().Reverse().Take(50))
+                {
+                    <div style="margin-bottom: 0.35rem; color: @(log.Level == "ERROR" ? "#f87171" : (log.Level == "WARN" ? "#fbbf24" : "#e2e8f0"));">
+                        <span style="color: #94a3b8;">[@log.TimestampUtc.ToLocalTime().ToString("HH:mm:ss")]</span> @log.Message
+                    </div>
+                }
+            }
+        </div>
+    </section>
 
+    <!-- Manual File Backup Test Section (Preserved for compatibility) -->
+    <section class="card-section">
+        <h2>Manual File Backup Test (Single File)</h2>
         <div class="diagnostic-section">
             <div class="form-group">
                 <label class="form-label" for="manualFilePath">Absolute Local File Path:</label>
@@ -138,7 +196,7 @@
 
             <div>
                 <button class="btn btn-primary" @onclick="BackupSingleFileAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))">
-                    <span>🚀 Backup File</span>
+                    <span>🚀 Backup Single File</span>
                 </button>
             </div>
 
@@ -196,7 +254,7 @@
             </div>
             <div class="protocol-item">
                 <span class="label">Transport Layer</span>
-                <span class="val">Raw TCP Sockets (Zero-Copy Relay Streaming)</span>
+                <span class="val">Raw TCP Sockets (Streaming Relay without Full-File Buffering)</span>
             </div>
         </div>
     </section>
@@ -212,6 +270,7 @@
 
     private string backupSetName = "DefaultSet";
     private string localRootPath = "";
+    private string? activeLocalRootPath;
     private Guid activeBackupSetId = Guid.Empty;
     private string backupSetMessage = "";
     private bool backupSetIsError;
@@ -224,16 +283,38 @@
         try
         {
             clientState = await BackupService.GetIdentityAsync();
-            if (string.IsNullOrEmpty(localRootPath))
+            var profile = await ProfileService.GetProfileAsync();
+            if (profile != null)
             {
-                localRootPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "backup_test");
+                activeBackupSetId = profile.BackupSetId;
+                backupSetName = profile.Name;
+                localRootPath = profile.LocalRootPath;
+                activeLocalRootPath = profile.LocalRootPath;
             }
+            else if (string.IsNullOrEmpty(localRootPath))
+            {
+                localRootPath = Path.Combine(AppContext.BaseDirectory, "demo_sync");
+            }
+
             await CheckGatewayConnectionAsync();
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Error initializing diagnostic UI");
         }
+    }
+
+    private async Task RefreshStateAsync()
+    {
+        await CheckGatewayConnectionAsync();
+        clientState = await BackupService.GetIdentityAsync();
+        var profile = await ProfileService.GetProfileAsync();
+        if (profile != null)
+        {
+            activeBackupSetId = profile.BackupSetId;
+            activeLocalRootPath = profile.LocalRootPath;
+        }
+        StateHasChanged();
     }
 
     private async Task CheckGatewayConnectionAsync()
@@ -279,10 +360,25 @@
         }
     }
 
-    private async Task CreateBackupSetAsync()
+    private async Task CreateAndActivateProfileAsync()
     {
         if (string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))
             return;
+
+        // Backend directory existence validation (Section 24)
+        if (!Directory.Exists(localRootPath))
+        {
+            try
+            {
+                Directory.CreateDirectory(localRootPath);
+            }
+            catch (Exception ex)
+            {
+                backupSetMessage = $"Invalid LocalRootPath: Directory does not exist and cannot be created ({ex.Message})";
+                backupSetIsError = true;
+                return;
+            }
+        }
 
         isLoading = true;
         backupSetMessage = "";
@@ -292,7 +388,18 @@
             if (response.Success && response.BackupSetId != Guid.Empty)
             {
                 activeBackupSetId = response.BackupSetId;
-                backupSetMessage = $"Backup set '{response.Name}' created successfully!";
+                activeLocalRootPath = localRootPath;
+
+                var profile = new SyncProfile
+                {
+                    BackupSetId = response.BackupSetId,
+                    Name = backupSetName,
+                    LocalRootPath = localRootPath,
+                    AutomaticSyncEnabled = SyncEngine.IsRunning
+                };
+                await ProfileService.SaveProfileAsync(profile);
+
+                backupSetMessage = $"Backup set '{response.Name}' created and activated!";
                 backupSetIsError = false;
             }
             else
@@ -312,6 +419,97 @@
         }
     }
 
+    private async Task StartAutomaticSyncAsync()
+    {
+        if (activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(activeLocalRootPath))
+        {
+            backupSetMessage = "Please create or activate a backup set first.";
+            backupSetIsError = true;
+            return;
+        }
+
+        if (!Directory.Exists(activeLocalRootPath))
+        {
+            backupSetMessage = $"Directory '{activeLocalRootPath}' does not exist.";
+            backupSetIsError = true;
+            return;
+        }
+
+        isLoading = true;
+        try
+        {
+            var profile = new SyncProfile
+            {
+                BackupSetId = activeBackupSetId,
+                Name = backupSetName,
+                LocalRootPath = activeLocalRootPath,
+                AutomaticSyncEnabled = true
+            };
+            await ProfileService.SaveProfileAsync(profile);
+
+            await SyncEngine.StartAsync(profile);
+            backupSetMessage = "Automatic synchronization started.";
+            backupSetIsError = false;
+        }
+        catch (Exception ex)
+        {
+            backupSetMessage = $"Failed to start automatic sync: {ex.Message}";
+            backupSetIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task StopAutomaticSyncAsync()
+    {
+        isLoading = true;
+        try
+        {
+            await SyncEngine.StopAsync();
+
+            var profile = await ProfileService.GetProfileAsync();
+            if (profile != null)
+            {
+                profile.AutomaticSyncEnabled = false;
+                await ProfileService.SaveProfileAsync(profile);
+            }
+
+            backupSetMessage = "Automatic synchronization stopped.";
+            backupSetIsError = false;
+        }
+        catch (Exception ex)
+        {
+            backupSetMessage = $"Error stopping sync: {ex.Message}";
+            backupSetIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task ReconcileNowAsync()
+    {
+        isLoading = true;
+        try
+        {
+            await SyncEngine.ReconcileNowAsync();
+            backupSetMessage = "Reconciliation finished.";
+            backupSetIsError = false;
+        }
+        catch (Exception ex)
+        {
+            backupSetMessage = $"Reconciliation failed: {ex.Message}";
+            backupSetIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
     private async Task BackupSingleFileAsync()
     {
         if (activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))
@@ -321,7 +519,8 @@
         backupOperationResult = null;
         try
         {
-            backupOperationResult = await BackupService.BackupSingleFileAsync(activeBackupSetId, localRootPath, manualFilePath);
+            string root = activeLocalRootPath ?? localRootPath;
+            backupOperationResult = await BackupService.BackupSingleFileAsync(activeBackupSetId, root, manualFilePath);
         }
         catch (Exception ex)
         {
