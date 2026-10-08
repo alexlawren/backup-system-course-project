@@ -1,0 +1,405 @@
+@page "/files/{fileId:guid}"
+@rendermode InteractiveServer
+@using Backup.Client.Web.Services
+@using Backup.Shared.DTOs
+@using Backup.Shared.Messages
+@inject IBackupClientService BackupService
+@inject ISyncProfileService ProfileService
+@inject NavigationManager Navigation
+@inject ILogger<FileDetails> Logger
+
+<PageTitle>Backup System - File Version History</PageTitle>
+
+<div class="system-container">
+    <header class="system-header">
+        <div class="badge-tag">Change-set #6 — Version Browser &amp; Restore</div>
+        <h1>File Version Details</h1>
+        <p class="subtitle">Inspect version history and perform safe streaming restore</p>
+    </header>
+
+    <div style="margin-bottom: 0.5rem;">
+        <a href="/files" class="btn btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 0.5rem;">
+            <span>← Back to Files List</span>
+        </a>
+    </div>
+
+    @if (isLoading)
+    {
+        <div class="card-section">
+            <p>Loading file and version details...</p>
+        </div>
+    }
+    else if (!string.IsNullOrEmpty(errorMessage) && fileMetadata == null)
+    {
+        <div class="card-section">
+            <div class="result-box error">
+                <strong>Error:</strong>
+                <p>@errorMessage</p>
+                <a href="/files" style="color: var(--accent); margin-top: 0.5rem; display: inline-block;">Return to files list</a>
+            </div>
+        </div>
+    }
+    else if (fileMetadata != null)
+    {
+        <!-- File Metadata Overview -->
+        <section class="card-section">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <h2 class="mono" style="color: var(--accent); margin-bottom: 0.25rem;">@fileMetadata.RelativePath</h2>
+                    <p style="font-size: 0.8rem; color: var(--text-secondary); font-family: ui-monospace, monospace;">
+                        FileId: @fileMetadata.FileId
+                    </p>
+                </div>
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                    @if (fileMetadata.IsDeleted)
+                    {
+                        <span class="status-badge badge-red">Status: Deleted</span>
+                    }
+                    else
+                    {
+                        <span class="status-badge badge-green">Status: Active</span>
+                    }
+                    <span class="status-badge badge-gray">Current: v@fileMetadata.CurrentVersionNumber</span>
+                </div>
+            </div>
+
+            <div class="kv-table" style="margin-top: 1.25rem;">
+                <span class="kv-key">Target Local Path:</span>
+                <span class="kv-value">@(activeProfile != null ? Path.Combine(activeProfile.LocalRootPath, fileMetadata.RelativePath) : "—")</span>
+
+                <span class="kv-key">Current Size:</span>
+                <span class="kv-value">@(fileMetadata.CurrentSize.HasValue ? FormatSize(fileMetadata.CurrentSize.Value) : "—")</span>
+
+                <span class="kv-key">Current SHA-256:</span>
+                <span class="kv-value">@(fileMetadata.CurrentSha256 ?? "—")</span>
+
+                <span class="kv-key">Last Updated (UTC):</span>
+                <span class="kv-value">@fileMetadata.UpdatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss")</span>
+            </div>
+        </section>
+
+        <!-- Restore Execution Result Card -->
+        @if (lastRestoreResult != null)
+        {
+            <section class="card-section">
+                @if (lastRestoreResult.Success)
+                {
+                    <div class="result-box success">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3 style="color: var(--success); font-size: 1.1rem;">
+                                @if (lastRestoreResult.Status == "SUCCESS")
+                                {
+                                    <span>✅ File Successfully Restored &amp; Synchronized</span>
+                                }
+                                else
+                                {
+                                    <span>⚠️ Restored Locally (Server Synchronization Pending)</span>
+                                }
+                            </h3>
+                            <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" @onclick="() => lastRestoreResult = null">✕ Dismiss</button>
+                        </div>
+
+                        <div class="kv-table" style="margin-top: 0.5rem;">
+                            <span class="kv-key">Status:</span>
+                            <span class="kv-value">
+                                <span class="status-badge @(lastRestoreResult.Status == "SUCCESS" ? "badge-green" : "badge-amber")">
+                                    @lastRestoreResult.Status
+                                </span>
+                            </span>
+
+                            <span class="kv-key">Source Version:</span>
+                            <span class="kv-value">v@lastRestoreResult.SourceVersionNumber</span>
+
+                            <span class="kv-key">New Version:</span>
+                            <span class="kv-value">@(lastRestoreResult.NewCurrentVersionNumber.HasValue ? $"v{lastRestoreResult.NewCurrentVersionNumber.Value}" : "Same as current")</span>
+
+                            <span class="kv-key">Target Local Path:</span>
+                            <span class="kv-value">@lastRestoreResult.TargetLocalPath</span>
+
+                            <span class="kv-key">SHA-256 Verified:</span>
+                            <span class="kv-value">@lastRestoreResult.Sha256Verified</span>
+
+                            <span class="kv-key">Size Restored:</span>
+                            <span class="kv-value">@FormatSize(lastRestoreResult.Size)</span>
+
+                            @if (!string.IsNullOrEmpty(lastRestoreResult.ErrorMessage))
+                            {
+                                <span class="kv-key">Notice:</span>
+                                <span class="kv-value" style="color: var(--warning);">@lastRestoreResult.ErrorMessage</span>
+                            }
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="result-box error">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3 style="color: #f87171; font-size: 1.1rem;">❌ Restore Operation Failed</h3>
+                            <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;" @onclick="() => lastRestoreResult = null">✕ Dismiss</button>
+                        </div>
+                        <p style="margin-top: 0.5rem; color: #fca5a5;">@lastRestoreResult.ErrorMessage</p>
+                    </div>
+                }
+            </section>
+        }
+
+        <!-- Versions History Section -->
+        <section class="card-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+                <h2>Version History (Immutable)</h2>
+                <button class="btn btn-secondary" @onclick="ReloadDataAsync" disabled="@isOperating">
+                    <span>🔄 Refresh</span>
+                </button>
+            </div>
+
+            @if (versions.Count == 0)
+            {
+                <p style="color: var(--text-secondary);">No historical versions recorded for this file.</p>
+            }
+            else
+            {
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Version</th>
+                                <th>Size</th>
+                                <th>SHA-256</th>
+                                <th>Created At (UTC)</th>
+                                <th style="text-align: right;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var ver in versions)
+                            {
+                                bool isCurrent = (ver.VersionNumber == fileMetadata.CurrentVersionNumber && !fileMetadata.IsDeleted);
+                                <tr>
+                                    <td>
+                                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                            <span class="status-badge @(isCurrent ? "badge-green" : "badge-gray")">
+                                                v@ver.VersionNumber
+                                            </span>
+                                            @if (isCurrent)
+                                            {
+                                                <span style="font-size: 0.75rem; color: var(--success); font-weight: 600;">Current</span>
+                                            }
+                                        </div>
+                                    </td>
+                                    <td class="mono">
+                                        @FormatSize(ver.Size)
+                                    </td>
+                                    <td class="mono" title="@ver.Sha256" style="cursor: help;">
+                                        @FormatTruncatedHash(ver.Sha256)
+                                    </td>
+                                    <td style="font-size: 0.8rem; color: var(--text-secondary);">
+                                        @ver.CreatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss")
+                                    </td>
+                                    <td style="text-align: right;">
+                                        <button class="btn btn-primary"
+                                                style="padding: 0.35rem 0.85rem; font-size: 0.8rem;"
+                                                disabled="@isOperating"
+                                                @onclick="() => RequestRestoreConfirmation(ver)">
+                                            <span>📥 Restore</span>
+                                        </button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+    }
+
+    <!-- Restore Confirmation Modal (Section 30) -->
+    @if (versionToRestore != null && fileMetadata != null)
+    {
+        <div class="modal-overlay">
+            <div class="modal-card">
+                <div class="modal-header">
+                    <h3>Confirm File Version Restore</h3>
+                    <button class="btn btn-secondary" style="padding: 0.2rem 0.5rem;" @onclick="CancelRestoreConfirmation" disabled="@isOperating">✕</button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="kv-table">
+                        <span class="kv-key">File:</span>
+                        <span class="kv-value">@fileMetadata.RelativePath</span>
+
+                        <span class="kv-key">Selected Version:</span>
+                        <span class="kv-value">v@versionToRestore.VersionNumber</span>
+
+                        <span class="kv-key">Version Created:</span>
+                        <span class="kv-value">@versionToRestore.CreatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss") UTC</span>
+
+                        <span class="kv-key">Version Size:</span>
+                        <span class="kv-value">@FormatSize(versionToRestore.Size)</span>
+
+                        <span class="kv-key">Version SHA-256:</span>
+                        <span class="kv-value">@versionToRestore.Sha256</span>
+                    </div>
+
+                    <div class="modal-warning">
+                        <strong>⚠️ Предупреждение о замене файла:</strong>
+                        <p style="margin-top: 0.25rem;">
+                            Текущий локальный файл будет заменён содержимым выбранной версии.
+                            Если локальный файл содержит несохранённые изменения, перед восстановлением будет автоматически создана резервная версия на сервере.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" @onclick="CancelRestoreConfirmation" disabled="@isOperating">
+                        <span>Отмена</span>
+                    </button>
+                    <button class="btn btn-primary" @onclick="ExecuteRestoreAsync" disabled="@isOperating">
+                        @if (isOperating)
+                        {
+                            <span>⏳ Восстановление...</span>
+                        }
+                        else
+                        {
+                            <span>📥 Подтвердить восстановление</span>
+                        }
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public Guid FileId { get; set; }
+
+    private SyncProfile? activeProfile;
+    private FileMetadataDto? fileMetadata;
+    private List<FileVersionDto> versions = new();
+    private FileVersionDto? versionToRestore;
+    private RestoreExecutionResult? lastRestoreResult;
+
+    private bool isLoading = true;
+    private bool isOperating = false;
+    private string? errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadDataAsync();
+    }
+
+    private async Task ReloadDataAsync()
+    {
+        isLoading = true;
+        errorMessage = null;
+
+        try
+        {
+            activeProfile = await ProfileService.GetProfileAsync();
+            if (activeProfile == null)
+            {
+                errorMessage = "No active backup set profile found.";
+                return;
+            }
+
+            // 1. Fetch file list to find file metadata
+            var filesResp = await BackupService.GetFilesAsync(activeProfile.BackupSetId, includeDeleted: true);
+            if (!filesResp.Success)
+            {
+                errorMessage = filesResp.ErrorMessage ?? "Failed to query files from server.";
+                return;
+            }
+
+            fileMetadata = filesResp.Files.FirstOrDefault(f => f.FileId == FileId);
+            if (fileMetadata == null)
+            {
+                errorMessage = $"File '{FileId}' was not found in active Backup Set.";
+                return;
+            }
+
+            // 2. Fetch versions
+            var verResp = await BackupService.GetVersionsAsync(FileId);
+            if (!verResp.Success)
+            {
+                errorMessage = verResp.ErrorMessage ?? "Failed to query versions from server.";
+                return;
+            }
+
+            versions = verResp.Versions ?? new();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load file details for {FileId}", FileId);
+            errorMessage = $"Error loading details: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private void RequestRestoreConfirmation(FileVersionDto version)
+    {
+        versionToRestore = version;
+    }
+
+    private void CancelRestoreConfirmation()
+    {
+        versionToRestore = null;
+    }
+
+    private async Task ExecuteRestoreAsync()
+    {
+        if (versionToRestore == null || activeProfile == null || fileMetadata == null)
+        {
+            return;
+        }
+
+        isOperating = true;
+        lastRestoreResult = null;
+
+        try
+        {
+            int verNum = versionToRestore.VersionNumber;
+            versionToRestore = null; // Close modal
+
+            var result = await BackupService.RestoreVersionAsync(
+                activeProfile.BackupSetId,
+                fileMetadata.FileId,
+                verNum);
+
+            lastRestoreResult = result;
+
+            // Refresh file list and version history to show updated current version
+            await ReloadDataAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Unhandled exception during restore for file {FileId}", FileId);
+            lastRestoreResult = new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                RelativePath = fileMetadata?.RelativePath ?? string.Empty,
+                ErrorMessage = $"Restore failed: {ex.Message}"
+            };
+        }
+        finally
+        {
+            isOperating = false;
+        }
+    }
+
+    private static string FormatTruncatedHash(string hash)
+    {
+        if (string.IsNullOrEmpty(hash) || hash.Length < 16) return hash;
+        return $"{hash[..8]}...{hash[^8..]}";
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{(bytes / 1024.0):F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{(bytes / (1024.0 * 1024.0)):F2} MB";
+        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)):F2} GB";
+    }
+}

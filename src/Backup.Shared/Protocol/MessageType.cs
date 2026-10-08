@@ -31,8 +31,11 @@ public enum MessageType
     FilesResponse,
     GetVersions,
     VersionsResponse,
+    GetChangeLog,
+    ChangeLogResponse,
 
     RestoreRequest,
+    RestoreReady,
     RestoreFile,
     RestoreCompleted,
 

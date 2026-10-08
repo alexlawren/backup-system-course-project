@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Backup.Shared.Errors;
 using Backup.Shared.Messages;
 using Backup.Shared.Validation;
 using Microsoft.Extensions.Logging;
@@ -27,6 +28,7 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
     Task StartAsync(SyncProfile profile, CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
     Task ReconcileNowAsync(CancellationToken cancellationToken = default);
+    Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default);
 }
 
 public class DebouncedFileEvent
@@ -47,6 +49,8 @@ public class SyncEngine : ISyncEngine
     private readonly IDirectoryScanner _scanner;
     private readonly IFileSystemWatcherService _watcherService;
     private readonly IFileStabilityHelper _stabilityHelper;
+    private readonly IRestoreSuppressionService _suppressionService;
+    private readonly AsyncPathLock _pathLocks = new();
     private readonly ILogger<SyncEngine> _logger;
 
     private readonly SemaphoreSlim _syncLock = new(1, 1);
@@ -97,7 +101,8 @@ public class SyncEngine : ISyncEngine
         IFileSystemWatcherService watcherService,
         IFileStabilityHelper stabilityHelper,
         ILogger<SyncEngine> logger,
-        int debounceDelayMs = 750)
+        int debounceDelayMs = 750,
+        IRestoreSuppressionService? suppressionService = null)
     {
         _gatewayClient = gatewayClient;
         _identityService = identityService;
@@ -107,6 +112,7 @@ public class SyncEngine : ISyncEngine
         _stabilityHelper = stabilityHelper;
         _logger = logger;
         _debounceDelayMs = debounceDelayMs;
+        _suppressionService = suppressionService ?? new RestoreSuppressionService();
 
         _watcherService.OverflowOrErrorOccurred += OnWatcherOverflowOrError;
     }
@@ -640,10 +646,23 @@ public class SyncEngine : ISyncEngine
                 case FileChangeKind.Created:
                 case FileChangeKind.Changed:
                 {
+                    using var pathLock = await _pathLocks.LockAsync(item.Key, cancellationToken);
+
                     if (!File.Exists(item.FullPath))
                     {
                         // File disappeared before debounce finished
                         return;
+                    }
+
+                    // Check suppression echo (Section 16)
+                    if (_suppressionService.IsSuppressed(item.Key))
+                    {
+                        string currentSha = await FileStreamingHelper.ComputeFileSha256Async(item.FullPath, cancellationToken);
+                        if (_suppressionService.ShouldSuppress(item.Key, currentSha))
+                        {
+                            Log($"[Restore] Watcher echo suppressed: {item.Key}");
+                            return;
+                        }
                     }
 
                     Log($"[FileWatcher] Debounced -> sync ({item.Kind}): {item.Key}");
@@ -696,6 +715,7 @@ public class SyncEngine : ISyncEngine
 
                 case FileChangeKind.Deleted:
                 {
+                    using var pathLock = await _pathLocks.LockAsync(item.Key, cancellationToken);
                     Log($"[FileWatcher] Debounced -> delete: {item.Key}");
 
                     var delResp = await _gatewayClient.DeleteFileAsync(new FileDeletedRequest
@@ -722,6 +742,7 @@ public class SyncEngine : ISyncEngine
 
                 case FileChangeKind.Renamed:
                 {
+                    using var pathLock = await _pathLocks.LockAsync(item.Key, cancellationToken);
                     string oldRelative = string.Empty;
                     if (!string.IsNullOrWhiteSpace(item.OldFullPath))
                     {
@@ -814,6 +835,312 @@ public class SyncEngine : ISyncEngine
             Log($"[SyncEngine] Network or processing error for '{item.Key}': {ex.Message}. Full reconciliation will be required.", "WARN");
             ReconciliationRequired = true;
         }
+    }
+
+    public async Task<RestoreExecutionResult> RestoreVersionAsync(
+        Guid backupSetId,
+        Guid fileId,
+        int versionNumber,
+        CancellationToken cancellationToken = default)
+    {
+        if (_activeProfile == null)
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                ErrorCode = "NO_ACTIVE_PROFILE",
+                ErrorMessage = "Cannot restore file: no active backup set profile."
+            };
+        }
+
+        if (_activeProfile.BackupSetId != backupSetId)
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                ErrorCode = "BACKUP_SET_MISMATCH",
+                ErrorMessage = "BackupSetId does not match current active profile."
+            };
+        }
+
+        var identity = await _identityService.GetStateAsync(cancellationToken);
+        if (identity.ClientId == null)
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                ErrorCode = "CLIENT_NOT_REGISTERED",
+                ErrorMessage = "Client station is not registered."
+            };
+        }
+
+        // 1. Resolve relative path for this file from server
+        var filesResp = await _gatewayClient.GetFilesAsync(new GetFilesRequest
+        {
+            BackupSetId = backupSetId,
+            IncludeDeleted = true
+        }, cancellationToken);
+
+        if (!filesResp.Success || filesResp.Files == null)
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                ErrorCode = "METADATA_UNAVAILABLE",
+                ErrorMessage = filesResp.ErrorMessage ?? "Failed to query files from server."
+            };
+        }
+
+        var fileMeta = filesResp.Files.FirstOrDefault(f => f.FileId == fileId);
+        if (fileMeta == null)
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                ErrorCode = "FILE_NOT_FOUND",
+                ErrorMessage = $"File {fileId} was not found in active backup set."
+            };
+        }
+
+        string relativePath = fileMeta.RelativePath;
+
+        // 2. Acquire per-path lock
+        using var pathLock = await _pathLocks.LockAsync(relativePath, cancellationToken);
+
+        string root = Path.GetFullPath(_activeProfile.LocalRootPath);
+        string targetFullPath = Path.GetFullPath(Path.Combine(root, relativePath));
+        string fullRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+        if (!targetFullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                RelativePath = relativePath,
+                TargetLocalPath = targetFullPath,
+                SourceVersionNumber = versionNumber,
+                ErrorCode = BackupErrorCodes.InvalidRelativePath,
+                ErrorMessage = "Target file path escapes backup set root directory."
+            };
+        }
+
+        // 3. Current file pre-backup before overwrite (Section 3 & 28)
+        if (File.Exists(targetFullPath))
+        {
+            Log($"[Restore] Pre-backup: checking current local file '{relativePath}' before restore.");
+            var preBackupResp = await _gatewayClient.BackupFileAsync(
+                backupSetId,
+                relativePath,
+                targetFullPath,
+                identity.ClientId,
+                cancellationToken);
+
+            if (!preBackupResp.Success)
+            {
+                Log($"[Restore] Pre-backup of current local content failed: {preBackupResp.ErrorMessage}. In-place restore aborted.", "ERROR");
+                return new RestoreExecutionResult
+                {
+                    Success = false,
+                    Status = "FAILED",
+                    RelativePath = relativePath,
+                    TargetLocalPath = targetFullPath,
+                    SourceVersionNumber = versionNumber,
+                    ErrorCode = "PRE_BACKUP_FAILED",
+                    ErrorMessage = $"Cannot safely restore: pre-backup of current local content failed: {preBackupResp.ErrorMessage}"
+                };
+            }
+
+            Log($"[Restore] Current local content backed up");
+        }
+
+        // 4. Download and verify restore file
+        Log($"[Restore] Requested file '{relativePath}' version {versionNumber}");
+        var restoreReq = new RestoreRequest
+        {
+            ClientId = identity.ClientId.Value,
+            BackupSetId = backupSetId,
+            FileId = fileId,
+            VersionNumber = versionNumber
+        };
+
+        var downloadResult = await _gatewayClient.DownloadAndVerifyRestoreFileAsync(restoreReq, root, cancellationToken);
+        if (!downloadResult.Success)
+        {
+            Log($"[Restore] Download failed: {downloadResult.ErrorMessage}", "ERROR");
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                RelativePath = relativePath,
+                TargetLocalPath = targetFullPath,
+                SourceVersionNumber = versionNumber,
+                ErrorCode = downloadResult.ErrorCode,
+                ErrorMessage = downloadResult.ErrorMessage
+            };
+        }
+
+        Log($"[Restore] SHA-256 verified");
+
+        // 5. Watcher suppression and atomic local replace (Section 16, 17, 26)
+        _suppressionService.RegisterSuppression(relativePath, downloadResult.Sha256, TimeSpan.FromSeconds(30));
+
+        bool replaced = false;
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (File.Exists(targetFullPath))
+                {
+                    File.Move(downloadResult.TempFilePath, targetFullPath, overwrite: true);
+                }
+                else
+                {
+                    string? pDir = Path.GetDirectoryName(targetFullPath);
+                    if (!string.IsNullOrEmpty(pDir) && !Directory.Exists(pDir))
+                    {
+                        Directory.CreateDirectory(pDir);
+                    }
+                    File.Move(downloadResult.TempFilePath, targetFullPath);
+                }
+                replaced = true;
+                break;
+            }
+            catch (IOException ioEx)
+            {
+                if (attempt < 4)
+                {
+                    await Task.Delay(100 * (attempt + 1), cancellationToken);
+                }
+                else
+                {
+                    _logger.LogWarning(ioEx, "[Restore] Target locked: could not replace file '{Path}'", targetFullPath);
+                }
+            }
+        }
+
+        if (!replaced)
+        {
+            if (File.Exists(downloadResult.TempFilePath))
+            {
+                try { File.Delete(downloadResult.TempFilePath); } catch { }
+            }
+            _suppressionService.RemoveSuppression(relativePath);
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                RelativePath = relativePath,
+                TargetLocalPath = targetFullPath,
+                SourceVersionNumber = versionNumber,
+                ErrorCode = "RESTORE_TARGET_LOCKED",
+                ErrorMessage = "Target local file is locked by another process."
+            };
+        }
+
+        Log($"[Restore] Local file replaced");
+
+        // 6. Update local index (Section 18)
+        var index = await _indexService.LoadIndexAsync(backupSetId, cancellationToken);
+        long restoredLen = new FileInfo(targetFullPath).Length;
+        DateTime lastWrite = new FileInfo(targetFullPath).LastWriteTimeUtc;
+        index.Entries[relativePath] = new LocalFileIndexEntry
+        {
+            RelativePath = relativePath,
+            Size = restoredLen,
+            LastWriteTimeUtc = lastWrite,
+            Sha256 = downloadResult.Sha256
+        };
+        await _indexService.SaveIndexAsync(index, cancellationToken);
+
+        // 7. Explicit re-backup with RESTORE change origin (Section 19, 20, 21, 22)
+        UploadCompletedResponse reBackupResp;
+        try
+        {
+            reBackupResp = await _gatewayClient.BackupFileAsync(
+                backupSetId,
+                relativePath,
+                targetFullPath,
+                identity.ClientId,
+                cancellationToken,
+                precomputedSha256: downloadResult.Sha256,
+                precomputedSize: downloadResult.Size,
+                changeOrigin: BackupChangeOrigin.Restore);
+        }
+        catch (Exception ex)
+        {
+            Log($"[Restore] Server sync failed after local replace: {ex.Message}", "WARN");
+            ReconciliationRequired = true;
+            _suppressionService.RemoveSuppression(relativePath);
+            return new RestoreExecutionResult
+            {
+                Success = true,
+                Status = "LOCAL_RESTORED_SYNC_PENDING",
+                RelativePath = relativePath,
+                TargetLocalPath = targetFullPath,
+                SourceVersionNumber = versionNumber,
+                Sha256Verified = downloadResult.Sha256,
+                Size = downloadResult.Size,
+                ErrorMessage = $"File restored locally, server synchronization pending: {ex}"
+            };
+        }
+
+        if (!reBackupResp.Success)
+        {
+            Log($"[Restore] Server sync returned error after local replace: {reBackupResp.ErrorMessage}", "WARN");
+            ReconciliationRequired = true;
+            _suppressionService.RemoveSuppression(relativePath);
+            return new RestoreExecutionResult
+            {
+                Success = true,
+                Status = "LOCAL_RESTORED_SYNC_PENDING",
+                RelativePath = relativePath,
+                TargetLocalPath = targetFullPath,
+                SourceVersionNumber = versionNumber,
+                Sha256Verified = downloadResult.Sha256,
+                Size = downloadResult.Size,
+                ErrorMessage = $"File restored locally, server synchronization pending: {reBackupResp.ErrorCode}: {reBackupResp.ErrorMessage}"
+            };
+        }
+
+        int newVersion = reBackupResp.VersionNumber ?? versionNumber;
+        Log($"[Restore] Restored content committed as version {newVersion}");
+
+        // Notify gateway RestoreCompleted
+        try
+        {
+            await _gatewayClient.SendRestoreCompletedAsync(new RestoreCompletedNotification
+            {
+                ClientId = identity.ClientId.Value,
+                BackupSetId = backupSetId,
+                FileId = fileId,
+                RestoredFromVersion = versionNumber,
+                NewVersionNumber = newVersion,
+                Success = true,
+                Status = "SUCCESS"
+            }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Restore] Non-critical: Failed to send RestoreCompleted ack to gateway");
+        }
+
+        return new RestoreExecutionResult
+        {
+            Success = true,
+            Status = "SUCCESS",
+            RelativePath = relativePath,
+            TargetLocalPath = targetFullPath,
+            SourceVersionNumber = versionNumber,
+            NewCurrentVersionNumber = newVersion,
+            Sha256Verified = downloadResult.Sha256,
+            Size = downloadResult.Size
+        };
     }
 
     public void Dispose()

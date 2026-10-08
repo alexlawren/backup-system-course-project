@@ -814,6 +814,31 @@ internal class FakeMetadataServiceClient : IMetadataServiceClient
             : Task.FromResult(new GetFilesResponse { Success = true, BackupSetId = request.BackupSetId });
     }
 
+    public Func<GetVersionsRequest, Task<GetVersionsResponse>>? GetVersionsFunc { get; set; }
+    public Func<ResolveVersionRequest, Task<ResolveVersionResponse>>? ResolveVersionFunc { get; set; }
+    public Func<GetChangeLogRequest, Task<GetChangeLogResponse>>? GetChangeLogFunc { get; set; }
+
+    public Task<GetVersionsResponse> GetVersionsAsync(GetVersionsRequest request, CancellationToken cancellationToken = default)
+    {
+        return GetVersionsFunc != null
+            ? GetVersionsFunc(request)
+            : Task.FromResult(new GetVersionsResponse { Success = true, FileId = request.FileId });
+    }
+
+    public Task<ResolveVersionResponse> ResolveVersionAsync(ResolveVersionRequest request, CancellationToken cancellationToken = default)
+    {
+        return ResolveVersionFunc != null
+            ? ResolveVersionFunc(request)
+            : Task.FromResult(new ResolveVersionResponse { Success = true, FileId = request.FileId, BackupSetId = Guid.NewGuid(), RelativePath = "test.txt" });
+    }
+
+    public Task<GetChangeLogResponse> GetChangeLogsAsync(GetChangeLogRequest request, CancellationToken cancellationToken = default)
+    {
+        return GetChangeLogFunc != null
+            ? GetChangeLogFunc(request)
+            : Task.FromResult(new GetChangeLogResponse { Success = true, BackupSetId = request.BackupSetId });
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
@@ -822,6 +847,7 @@ internal class FakeStorageServiceClient : IStorageServiceClient
     public int StoreFileCallCount { get; private set; }
 
     public Func<StoreFileRequest, Stream, Task<StoreFileResultResponse>>? StoreFileFunc { get; set; }
+    public Func<GetStoredFileRequest, Func<GetStoredFileResultResponse, Task<Stream>>, Task<GetStoredFileResultResponse>>? StreamStoredFileFunc { get; set; }
 
     public Task ConnectAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public Task<HelloResponse?> HelloAsync(string clientName = "Backup.SyncGateway", CancellationToken cancellationToken = default) =>
@@ -856,6 +882,27 @@ internal class FakeStorageServiceClient : IStorageServiceClient
     public Task<GetStoredFileResultResponse> GetStoredFileAsync(GetStoredFileRequest request, Stream destinationStream, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(new GetStoredFileResultResponse { Success = true });
+    }
+
+    public async Task<GetStoredFileResultResponse> StreamStoredFileAsync(
+        GetStoredFileRequest request,
+        Func<GetStoredFileResultResponse, Task<Stream>> prepareDestinationAsync,
+        CancellationToken cancellationToken = default)
+    {
+        if (StreamStoredFileFunc != null)
+        {
+            return await StreamStoredFileFunc(request, prepareDestinationAsync);
+        }
+
+        var result = new GetStoredFileResultResponse
+        {
+            Success = true,
+            StorageKey = request.StorageKey,
+            Size = 0,
+            Sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        };
+        await prepareDestinationAsync(result);
+        return result;
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

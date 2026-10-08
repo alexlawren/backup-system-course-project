@@ -38,7 +38,36 @@ public class ResolveVersionRequest
 public class ResolveVersionResponse
 {
     public Guid FileId { get; set; }
+    public Guid BackupSetId { get; set; }
+    public string RelativePath { get; set; } = string.Empty;
     public FileVersionDto? Version { get; set; }
+    public bool Success { get; set; } = true;
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class GetChangeLogRequest
+{
+    public Guid BackupSetId { get; set; }
+    public int Limit { get; set; } = 100;
+}
+
+public class ChangeLogEntryDto
+{
+    public Guid Id { get; set; }
+    public Guid BackupSetId { get; set; }
+    public Guid? FileId { get; set; }
+    public string? RelativePath { get; set; }
+    public string Action { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public string? Details { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+}
+
+public class GetChangeLogResponse
+{
+    public Guid BackupSetId { get; set; }
+    public List<ChangeLogEntryDto> Entries { get; set; } = new();
     public bool Success { get; set; } = true;
     public string? ErrorMessage { get; set; }
 }

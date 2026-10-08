@@ -178,8 +178,24 @@ public class StorageServiceClient : IStorageServiceClient
         Stream destinationStream,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(destinationStream);
+        return await StreamStoredFileAsync(request, _ => Task.FromResult(destinationStream), cancellationToken);
+    }
+
+    /// <summary>
+    /// Retrieves a stored file blob from Backup.StorageService with streaming relay:
+    /// 1. Sends GetStoredFile request.
+    /// 2. Receives GetStoredFileResult descriptor containing size and SHA-256.
+    /// 3. Calls prepareDestinationAsync(result) so caller can emit protocol descriptors/headers.
+    /// 4. Streams the StoredFile binary body into the returned destinationStream with bounded buffer.
+    /// </summary>
+    public async Task<GetStoredFileResultResponse> StreamStoredFileAsync(
+        GetStoredFileRequest request,
+        Func<GetStoredFileResultResponse, Task<Stream>> prepareDestinationAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(prepareDestinationAsync);
 
         await EnsureConnectedAsync(cancellationToken);
 
@@ -221,6 +237,9 @@ public class StorageServiceClient : IStorageServiceClient
             };
         }
 
+        // Prepare destination stream before receiving binary payload
+        var destinationStream = await prepareDestinationAsync(result);
+
         // 3. Receive StoredFile binary frame
         var storedHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
         if (storedHeader == null)
@@ -234,6 +253,7 @@ public class StorageServiceClient : IStorageServiceClient
         }
 
         await _reader.ReadBodyToStreamAsync(_stream!, destinationStream, storedHeader.BodyLength, cancellationToken);
+        await destinationStream.FlushAsync(cancellationToken);
         return result;
     }
 

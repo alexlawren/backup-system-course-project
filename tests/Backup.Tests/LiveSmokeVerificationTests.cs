@@ -119,6 +119,101 @@ public class LiveSmokeVerificationTests
         Assert.Equal("MODIFY", logs[1].Action);
     }
 
+    [Fact]
+    public async Task Section44_LiveManualSmoke_FullRestoreWorkflow()
+    {
+        // 0. Skip if live standalone cluster is not active on port 5000
+        if (!await CanConnectAsync("127.0.0.1", 5000))
+        {
+            return;
+        }
+
+        string tempDemoDir = Path.Combine(Path.GetTempPath(), "demo_monitored_folder_" + Guid.NewGuid().ToString("N")[..8]);
+        string clientStatePath = Path.Combine(Path.GetTempPath(), "demo_client_state_" + Guid.NewGuid().ToString("N")[..8] + ".json");
+        string testFilePath = Path.Combine(tempDemoDir, "demo_document.txt");
+
+        try
+        {
+            Directory.CreateDirectory(tempDemoDir);
+            var identityService = new ClientIdentityService(clientStatePath);
+            var gatewayClient = new BackupGatewayClient("127.0.0.1", 5000);
+            var clientService = new BackupClientService(gatewayClient, identityService);
+
+            // Register client
+            bool reg = await clientService.EnsureRegisteredAsync();
+            Assert.True(reg);
+
+            // Create backup set
+            var bs = await clientService.CreateBackupSetAsync("DemoSmokeSet", tempDemoDir);
+            Assert.True(bs.Success);
+            var backupSetId = bs.BackupSetId;
+
+            // Step 1: Create file -> v1
+            await File.WriteAllTextAsync(testFilePath, "Version One Demo Content");
+            var v1 = await clientService.BackupSingleFileAsync(backupSetId, tempDemoDir, testFilePath);
+            Assert.True(v1.Success);
+            Assert.Equal(1, v1.VersionNumber);
+            var fileId = v1.FileId!.Value;
+
+            // Step 2: Modify -> v2
+            await File.WriteAllTextAsync(testFilePath, "Version Two Demo Content");
+            var v2 = await clientService.BackupSingleFileAsync(backupSetId, tempDemoDir, testFilePath);
+            Assert.True(v2.Success);
+            Assert.Equal(2, v2.VersionNumber);
+
+            // Step 3: Modify -> v3
+            await File.WriteAllTextAsync(testFilePath, "Version Three Demo Content");
+            var v3 = await clientService.BackupSingleFileAsync(backupSetId, tempDemoDir, testFilePath);
+            Assert.True(v3.Success);
+            Assert.Equal(3, v3.VersionNumber);
+
+            // Step 4: Query files through Gateway
+            var filesResp = await clientService.GetFilesAsync(backupSetId);
+            Assert.True(filesResp.Success);
+            Assert.Contains(filesResp.Files, f => f.FileId == fileId && f.CurrentVersionNumber == 3);
+
+            // Step 5: Query versions through Gateway
+            var versionsResp = await clientService.GetVersionsAsync(fileId);
+            Assert.True(versionsResp.Success);
+            Assert.Equal(3, versionsResp.Versions.Count);
+
+            // Step 6: Restore version 1
+            var restoreResult = await clientService.RestoreVersionAsync(backupSetId, fileId, 1);
+            Assert.True(restoreResult.Success);
+            Assert.Equal("SUCCESS", restoreResult.Status);
+            Assert.Equal(4, restoreResult.NewCurrentVersionNumber);
+
+            // Step 7: Verify local disk content restored to v1
+            string diskContent = await File.ReadAllTextAsync(testFilePath);
+            Assert.Equal("Version One Demo Content", diskContent);
+
+            // Step 8: Verify DB state has v4
+            var dbOptions = new DbContextOptionsBuilder<MetadataDbContext>()
+                .UseNpgsql(PostgresConnectionString)
+                .Options;
+            await using var db = new MetadataDbContext(dbOptions);
+
+            var dbFile = await db.Files.Include(f => f.Versions).FirstAsync(f => f.Id == fileId);
+            Assert.Equal(4, dbFile.CurrentVersionNumber);
+            Assert.Equal(4, dbFile.Versions.Count);
+
+            var v1Record = dbFile.Versions.First(v => v.VersionNumber == 1);
+            var v4Record = dbFile.Versions.First(v => v.VersionNumber == 4);
+            Assert.Equal(v1Record.Sha256, v4Record.Sha256);
+
+            var logs = await db.ChangeLogs
+                .Where(l => l.FileId == fileId)
+                .OrderBy(l => l.CreatedAtUtc)
+                .ToListAsync();
+            Assert.Equal("RESTORE", logs.Last().Action);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDemoDir, recursive: true); } catch { }
+            try { File.Delete(clientStatePath); } catch { }
+        }
+    }
+
     private static async Task<bool> CanConnectAsync(string host, int port)
     {
         try

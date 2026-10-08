@@ -11,8 +11,8 @@
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Change-set #5 — Automatic Directory Synchronization</div>
-        <h1>Course Project / Directory Sync</h1>
+        <div class="badge-tag">Change-set #6 — Restore Flow + File/Version Browser</div>
+        <h1>Course Project / Backup System</h1>
         <p class="subtitle">«Клиент-серверная система резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений»</p>
     </header>
 
@@ -43,13 +43,19 @@
             </div>
         </div>
 
-        <div style="margin-top: 1rem; display: flex; gap: 0.75rem;">
+        <div style="margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
             <button class="btn btn-secondary" @onclick="CheckGatewayConnectionAsync" disabled="@isLoading">
                 <span>🔄 Ping Gateway</span>
             </button>
             <button class="btn btn-secondary" @onclick="RefreshStateAsync" disabled="@isLoading">
                 <span>🔄 Refresh UI State</span>
             </button>
+            <a href="/files" class="btn btn-primary" style="text-decoration: none;">
+                <span>📂 Browse Files &amp; Restore</span>
+            </a>
+            <a href="/history" class="btn btn-secondary" style="text-decoration: none;">
+                <span>📜 Change Log</span>
+            </a>
         </div>
     </section>
 

@@ -7,6 +7,7 @@ public class PendingFileOperationEntity
     public int ExpectedVersionNumber { get; set; }
     public long ExpectedSize { get; set; }
     public string ExpectedSha256 { get; set; } = string.Empty;
+    public string OperationKind { get; set; } = "NORMAL";
     public DateTime CreatedAtUtc { get; set; }
     public DateTime ExpiresAtUtc { get; set; }
 

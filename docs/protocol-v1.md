@@ -404,3 +404,161 @@ Gateway (Client)                                          StorageService
 }
 ```
 
+---
+
+## 8. Протокольный цикл восстановления версий и запросов браузера (Change-set #6)
+
+### 8.1. Сообщения просмотра файлов и версий
+
+#### 8.1.1. `GetFiles` (Клиент -> Gateway -> Metadata)
+Запрос списка файлов набора резервного копирования (`MessageType.GetFiles`):
+```json
+{
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "includeDeleted": true
+}
+```
+Ответ `MessageType.FilesResponse`:
+```json
+{
+  "files": [
+    {
+      "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
+      "relativePath": "docs/report.docx",
+      "currentVersionNumber": 3,
+      "size": 1048576,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "isDeleted": false,
+      "updatedAtUtc": "2026-10-08T12:00:00Z"
+    }
+  ],
+  "success": true,
+  "errorMessage": null
+}
+```
+
+#### 8.1.2. `GetVersions` (Клиент -> Gateway -> Metadata)
+Запрос списка исторических версий файла (`MessageType.GetVersions`):
+```json
+{
+  "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a"
+}
+```
+Ответ `MessageType.VersionsResponse` (упорядочен по убыванию `VersionNumber`):
+```json
+{
+  "versions": [
+    {
+      "versionNumber": 3,
+      "size": 1048576,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "storageKey": "clients/.../versions/0000000003.bin",
+      "createdAtUtc": "2026-10-08T12:00:00Z"
+    },
+    {
+      "versionNumber": 1,
+      "size": 1024,
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "storageKey": "clients/.../versions/0000000001.bin",
+      "createdAtUtc": "2026-10-08T10:00:00Z"
+    }
+  ],
+  "success": true,
+  "errorMessage": null
+}
+```
+
+#### 8.1.3. `GetChangeLog` (Клиент -> Gateway -> Metadata)
+Запрос аудиторского журнала изменений (`MessageType.GetChangeLog`):
+```json
+{
+  "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "limit": 100
+}
+```
+Ответ `MessageType.ChangeLogResponse`:
+```json
+{
+  "entries": [
+    {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "backupSetId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "fileId": "b2c3d4e5-f6a7-8901-bcde-f0123456789a",
+      "relativePath": "docs/report.docx",
+      "action": "RESTORE",
+      "status": "COMMITTED",
+      "details": "Restored version 4 with Sha256 e3b0c4...",
+      "timestampUtc": "2026-10-08T12:05:00Z"
+    }
+  ],
+  "success": true,
+  "errorMessage": null
+}
+```
+
+---
+
+### 8.2. Протокольный процесс восстановления (Restore Flow)
+
+```
+Client (Web)                     SyncGateway                 MetadataService         StorageService
+     |                                |                             |                       |
+     |-- 1. RestoreRequest ---------->|                             |                       |
+     |      (FileId, Version)         |-- 2. ResolveVersion ------->|                       |
+     |                                |<-- ResolveVersionResponse --|                       |
+     |                                |    (StorageKey, Size, SHA)  |                       |
+     |                                |                                                     |
+     |                                |-- 3. GetStoredFile -------------------------------->|
+     |                                |<-- GetStoredFileResult (Size, SHA) -----------------|
+     |                                |                                                     |
+     |<-- 4. RestoreReady ------------|                                                     |
+     |      (Size, SHA, RelativePath) |                                                     |
+     |<-- 5. RestoreFile (Header) ----|                                                     |
+     |<-- 6. Binary Stream Relay -----|<-- StoredFile Binary Stream ------------------------|
+     |                                |                                                     |
+[Verify SHA-256]                      |                                                     |
+[Atomic Replace]                      |                                                     |
+[Register Suppression]                |                                                     |
+     |                                |                                                     |
+     |-- 7. BackupFileAsync --------->| (Re-backup restored content with origin=RESTORE)    |
+     |      (Origin: RESTORE)         |-- PrepareVersion (RESTORE)->|                       |
+     |                                |-- StoreFile / Commit ------>|                       |
+     |<-- UploadCompleted ------------|                             |                       |
+     |                                |                             |                       |
+     |-- 8. RestoreCompleted -------->|                             |                       |
+     |<-- RestoreCompletedResponse ---|                             |                       |
+```
+
+#### Порядок взаимодействия:
+1. **RestoreRequest:** Клиент отправляет JSON-кадр `MessageType.RestoreRequest` со ссылкой на `FileId` и восстанавливаемый `VersionNumber`.
+2. **Разрешение версии:** Gateway обращается к `MetadataService.ResolveVersion` для проверки существования версии и получения `StorageKey`.
+3. **Потоковая ретрансляция (Streaming Relay):**
+   - Gateway открывает поток к `StorageService.GetStoredFile`;
+   - Получив дескриптор из хранилища, Gateway отправляет клиенту `RestoreReady` (`Size`, `Sha256`, `RelativePath`);
+   - Следом Gateway отправляет заголовок `RestoreFile` (`BodyLength = Size`, `ContentType = application/octet-stream`);
+   - Бинарные данные пересылаются блоками по 64 KiB без сохранения на диске Gateway и без загрузки файла целиком в память.
+4. **Безопасная временная запись и валидация на клиенте:**
+   - Клиент формирует целевой путь `LocalRootPath + RelativePath` и валидирует его через `ProtocolPathValidator` на отсутствие path traversal;
+   - Клиент создает временный файл в том же каталоге: `<file>.restore.<Guid>.tmp`;
+   - В процессе потоковой записи инкрементально рассчитывается SHA-256;
+   - После завершения проверяются условия: `ActualSize == ExpectedSize` и `ActualSha256 == ExpectedSha256`. При несовпадении temp удаляется, пользовательский файл не изменяется, возвращается ошибка.
+5. **Подавление эхо-событий наблюдателя (`RestoreSuppressionService`):**
+   - Перед заменой файла клиент регистрирует супрессию `(RelativePath, RestoredSha256, TTL = 30s)`;
+   - После атомарного перемещения `File.Move(temp, target, overwrite: true)` возникающие события FileSystemWatcher дебаунсятся, вычисляется хэш файла: если он совпадает с `RestoredSha256`, событие подавляется без создания дублирующей версии; если пользователь внес новое изменение (хэш изменился), событие синхронизируется в обычном порядке.
+6. **Неизменяемость версий (Version Immutability):**
+   - Restore **НЕ откатывает** `CurrentVersionNumber` назад;
+   - После локальной замены клиент выполняет `BackupFileAsync` с флагом `ChangeOrigin = BackupChangeOrigin.Restore`;
+   - В метаданных создается новая ревизия `v_next = CurrentVersionNumber + 1`;
+   - В `ChangeLog` фиксируется действие `RESTORE` (вместо `MODIFY`);
+   - Старые версии и физические блобы сохраняются полностью.
+7. **Защита несохраненных локальных правок (Pre-Backup):**
+   - Перед заменой локального файла клиент выполняет `BackupFileAsync` текущего состояния;
+   - Если локальный файл содержал несохраненные правки, сервер сначала фиксирует их как нормальную версию `v_edit`, и лишь затем восстанавливаемый файл коммитится как `v_restore`. Данные пользователя не теряются.
+8. **Восстановление логически удаленного файла:**
+   - Если файл был помечен `IsDeleted == true`, восстанавливаемая версия создает файл на диске, создает родительские каталоги, снимает флаг удаления (`IsDeleted = false`) и инкрементирует `CurrentVersionNumber`.
+9. **Обработка сбоев:**
+   - *Сбой до замены:* temp-файл удаляется, пользовательский файл не трогается, возвращается ошибка.
+   - *Сбой после замены (например, разрыв сети при ре-бэкапе):* файл остается восстановленным на диске, клиенту выставляется флаг `ReconciliationRequired = true` (`LOCAL_RESTORED_SYNC_PENDING`), следующий sync коммитит версию на сервере.
+
+

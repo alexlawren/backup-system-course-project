@@ -1,5 +1,11 @@
 namespace Backup.Shared.Messages;
 
+public enum BackupChangeOrigin
+{
+    Normal,
+    Restore
+}
+
 public class FileChangeRequest
 {
     public Guid BackupSetId { get; set; }
@@ -7,6 +13,7 @@ public class FileChangeRequest
     public string RelativePath { get; set; } = string.Empty;
     public long Size { get; set; }
     public string Sha256 { get; set; } = string.Empty;
+    public BackupChangeOrigin ChangeOrigin { get; set; } = BackupChangeOrigin.Normal;
 }
 
 public class UploadRequiredResponse

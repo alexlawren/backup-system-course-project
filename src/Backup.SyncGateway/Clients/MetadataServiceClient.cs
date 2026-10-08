@@ -130,6 +130,15 @@ public class MetadataServiceClient : IMetadataServiceClient
             cancellationToken);
     }
 
+    public async Task<GetChangeLogResponse> GetChangeLogsAsync(GetChangeLogRequest request, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<GetChangeLogRequest, GetChangeLogResponse>(
+            MessageType.GetChangeLog,
+            MessageType.ChangeLogResponse,
+            request,
+            cancellationToken);
+    }
+
     private async Task<TResponse> SendRequestAsync<TRequest, TResponse>(
         MessageType requestType,
         MessageType expectedResponseType,

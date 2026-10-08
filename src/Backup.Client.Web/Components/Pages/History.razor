@@ -1,0 +1,195 @@
+@page "/history"
+@rendermode InteractiveServer
+@using Backup.Client.Web.Services
+@using Backup.Shared.Messages
+@inject IBackupClientService BackupService
+@inject ISyncProfileService ProfileService
+@inject ILogger<History> Logger
+
+<PageTitle>Backup System - Change Log History</PageTitle>
+
+<div class="system-container">
+    <header class="system-header">
+        <div class="badge-tag">Audit Trail — PostgreSQL Change Log</div>
+        <h1>System Change Log History</h1>
+        <p class="subtitle">Complete journal of changes: CREATE, MODIFY, RENAME, DELETE, and RESTORE</p>
+    </header>
+
+    @if (isLoadingProfile)
+    {
+        <div class="card-section">
+            <p>Loading profile information...</p>
+        </div>
+    }
+    else if (activeProfile == null)
+    {
+        <div class="card-section">
+            <div class="result-box error">
+                <strong>No Active Sync Profile</strong>
+                <p>Please configure a Backup Set profile on the <a href="/" style="color: var(--accent);">Dashboard</a> first.</p>
+            </div>
+        </div>
+    }
+    else
+    {
+        <section class="card-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <h2>Change Log: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
+                    <p style="font-size: 0.85rem; color: var(--text-secondary);">
+                        Queried through SyncGateway → MetadataService (Immutable Audit Records)
+                    </p>
+                </div>
+                <div>
+                    <button class="btn btn-secondary" @onclick="LoadLogAsync" disabled="@isLoadingLog">
+                        <span>🔄 Refresh Log</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <section class="card-section">
+            @if (isLoadingLog)
+            {
+                <p>Loading change log records...</p>
+            }
+            else if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="result-box error">
+                    <strong>Error:</strong>
+                    <p>@errorMessage</p>
+                </div>
+            }
+            else if (entries.Count == 0)
+            {
+                <p style="color: var(--text-secondary); text-align: center; padding: 2rem;">No change log entries found yet.</p>
+            }
+            else
+            {
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp (UTC)</th>
+                                <th>Action</th>
+                                <th>File / Path</th>
+                                <th>Status</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var entry in entries)
+                            {
+                                <tr>
+                                    <td style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
+                                        @entry.CreatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss")
+                                    </td>
+                                    <td>
+                                        <span class="status-badge @GetActionBadgeClass(entry.Action)">
+                                            @entry.Action
+                                        </span>
+                                    </td>
+                                    <td class="mono">
+                                        @if (entry.FileId.HasValue && !string.IsNullOrEmpty(entry.RelativePath))
+                                        {
+                                            <a href="/files/@entry.FileId.Value" style="color: var(--accent); text-decoration: none;">
+                                                @entry.RelativePath
+                                            </a>
+                                        }
+                                        else if (!string.IsNullOrEmpty(entry.RelativePath))
+                                        {
+                                            <span>@entry.RelativePath</span>
+                                        }
+                                        else
+                                        {
+                                            <span style="color: var(--text-secondary);">—</span>
+                                        }
+                                    </td>
+                                    <td>
+                                        <span class="status-badge badge-gray">@entry.Status</span>
+                                    </td>
+                                    <td style="font-size: 0.85rem; color: var(--text-secondary);">
+                                        @(entry.Details ?? "—")
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary);">
+                    <span>Total journal entries: @entries.Count</span>
+                </div>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    private SyncProfile? activeProfile;
+    private bool isLoadingProfile = true;
+    private bool isLoadingLog = false;
+    private string? errorMessage;
+    private List<ChangeLogEntryDto> entries = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            activeProfile = await ProfileService.GetProfileAsync();
+            if (activeProfile != null)
+            {
+                await LoadLogAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load active profile");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            isLoadingProfile = false;
+        }
+    }
+
+    private async Task LoadLogAsync()
+    {
+        if (activeProfile == null) return;
+
+        isLoadingLog = true;
+        errorMessage = null;
+
+        try
+        {
+            var resp = await BackupService.GetChangeLogsAsync(activeProfile.BackupSetId, limit: 200);
+            if (resp.Success)
+            {
+                entries = resp.Entries ?? new();
+            }
+            else
+            {
+                errorMessage = resp.ErrorMessage ?? "Failed to query change log from gateway.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load changelog");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            isLoadingLog = false;
+        }
+    }
+
+    private static string GetActionBadgeClass(string action) => action.ToUpperInvariant() switch
+    {
+        "CREATE" => "badge-green",
+        "MODIFY" => "badge-gray",
+        "RENAME" => "badge-amber",
+        "DELETE" => "badge-red",
+        "RESTORE" => "badge-green",
+        _ => "badge-gray"
+    };
+}

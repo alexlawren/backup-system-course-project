@@ -11,19 +11,26 @@ public interface IBackupClientService
     Task<CreateBackupSetResponse> CreateBackupSetAsync(string name, string localRootPath, CancellationToken cancellationToken = default);
     Task<UploadCompletedResponse> BackupSingleFileAsync(Guid backupSetId, string localRootPath, string absoluteFilePath, CancellationToken cancellationToken = default);
     Task<bool> PingGatewayAsync(CancellationToken cancellationToken = default);
+    Task<GetFilesResponse> GetFilesAsync(Guid backupSetId, bool includeDeleted = true, CancellationToken cancellationToken = default);
+    Task<GetVersionsResponse> GetVersionsAsync(Guid fileId, CancellationToken cancellationToken = default);
+    Task<GetChangeLogResponse> GetChangeLogsAsync(Guid backupSetId, int limit = 100, CancellationToken cancellationToken = default);
+    Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default);
 }
 
 public class BackupClientService : IBackupClientService
 {
     private readonly BackupGatewayClient _gatewayClient;
     private readonly IClientIdentityService _identityService;
+    private readonly ISyncEngine? _syncEngine;
 
     public BackupClientService(
         BackupGatewayClient gatewayClient,
-        IClientIdentityService identityService)
+        IClientIdentityService identityService,
+        ISyncEngine? syncEngine = null)
     {
         _gatewayClient = gatewayClient;
         _identityService = identityService;
+        _syncEngine = syncEngine;
     }
 
     public async Task<ClientState> GetIdentityAsync(CancellationToken cancellationToken = default)
@@ -170,5 +177,47 @@ public class BackupClientService : IBackupClientService
             absoluteFilePath,
             state.ClientId,
             cancellationToken);
+    }
+
+    public async Task<GetFilesResponse> GetFilesAsync(Guid backupSetId, bool includeDeleted = true, CancellationToken cancellationToken = default)
+    {
+        return await _gatewayClient.GetFilesAsync(new GetFilesRequest
+        {
+            BackupSetId = backupSetId,
+            IncludeDeleted = includeDeleted
+        }, cancellationToken);
+    }
+
+    public async Task<GetVersionsResponse> GetVersionsAsync(Guid fileId, CancellationToken cancellationToken = default)
+    {
+        return await _gatewayClient.GetVersionsAsync(new GetVersionsRequest
+        {
+            FileId = fileId
+        }, cancellationToken);
+    }
+
+    public async Task<GetChangeLogResponse> GetChangeLogsAsync(Guid backupSetId, int limit = 100, CancellationToken cancellationToken = default)
+    {
+        return await _gatewayClient.GetChangeLogAsync(new GetChangeLogRequest
+        {
+            BackupSetId = backupSetId,
+            Limit = limit
+        }, cancellationToken);
+    }
+
+    public async Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default)
+    {
+        if (_syncEngine == null)
+        {
+            return new RestoreExecutionResult
+            {
+                Success = false,
+                Status = "FAILED",
+                ErrorCode = "ENGINE_NOT_AVAILABLE",
+                ErrorMessage = "SyncEngine is not available in current client context."
+            };
+        }
+
+        return await _syncEngine.RestoreVersionAsync(backupSetId, fileId, versionNumber, cancellationToken);
     }
 }

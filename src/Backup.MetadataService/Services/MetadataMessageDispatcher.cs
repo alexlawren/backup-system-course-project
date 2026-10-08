@@ -101,6 +101,12 @@ public class MetadataMessageDispatcher
                 await _writer.WriteJsonFrameAsync(stream, MessageType.ResolveVersionResult, rvResp, correlationId: header.MessageId, cancellationToken: cancellationToken);
                 break;
 
+            case MessageType.GetChangeLog:
+                var clReq = await _reader.ReadJsonBodyAsync<GetChangeLogRequest>(stream, header.BodyLength, cancellationToken);
+                var clResp = await _appService.GetChangeLogsAsync(clReq ?? new(), cancellationToken);
+                await _writer.WriteJsonFrameAsync(stream, MessageType.ChangeLogResponse, clResp, correlationId: header.MessageId, cancellationToken: cancellationToken);
+                break;
+
             default:
                 _logger.LogWarning("[MetadataService] Unhandled MessageType: {MessageType}", header.MessageType);
                 if (header.BodyLength > 0)

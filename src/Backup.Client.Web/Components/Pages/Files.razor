@@ -1,0 +1,206 @@
+@page "/files"
+@rendermode InteractiveServer
+@using Backup.Client.Web.Services
+@using Backup.Shared.DTOs
+@using Backup.Shared.Messages
+@inject IBackupClientService BackupService
+@inject ISyncProfileService ProfileService
+@inject NavigationManager Navigation
+@inject ILogger<Files> Logger
+
+<PageTitle>Backup System - Monitored Files</PageTitle>
+
+<div class="system-container">
+    <header class="system-header">
+        <div class="badge-tag">Change-set #6 — File Explorer</div>
+        <h1>Monitored Backup Files</h1>
+        <p class="subtitle">Active BackupSet File Catalog queried via SyncGateway → MetadataService</p>
+    </header>
+
+    @if (isLoadingProfile)
+    {
+        <div class="card-section">
+            <p>Loading profile information...</p>
+        </div>
+    }
+    else if (activeProfile == null)
+    {
+        <div class="card-section">
+            <div class="result-box error">
+                <strong>No Active Sync Profile</strong>
+                <p>Please configure and activate a Backup Set on the <a href="/" style="color: var(--accent);">Dashboard</a> first.</p>
+            </div>
+        </div>
+    }
+    else
+    {
+        <!-- Summary & Controls Section -->
+        <section class="card-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <h2>Backup Set: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
+                    <p style="font-size: 0.85rem; color: var(--text-secondary); font-family: ui-monospace, monospace;">
+                        Root: @activeProfile.LocalRootPath
+                    </p>
+                </div>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; cursor: pointer;">
+                        <input type="checkbox" @bind="includeDeleted" @bind:after="LoadFilesAsync" />
+                        <span>Include Deleted Files</span>
+                    </label>
+                    <button class="btn btn-secondary" @onclick="LoadFilesAsync" disabled="@isLoadingFiles">
+                        <span>🔄 Refresh</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Files Table Section -->
+        <section class="card-section">
+            @if (isLoadingFiles)
+            {
+                <p>Loading file list from gateway...</p>
+            }
+            else if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="result-box error">
+                    <strong>Error loading files:</strong>
+                    <p>@errorMessage</p>
+                </div>
+            }
+            else if (files.Count == 0)
+            {
+                <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
+                    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">📂 No files found in this Backup Set yet.</p>
+                    <p style="font-size: 0.9rem;">Files will appear here once directory synchronization or manual backup runs.</p>
+                </div>
+            }
+            else
+            {
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Relative Path</th>
+                                <th>Version</th>
+                                <th>Size</th>
+                                <th>Status</th>
+                                <th>Updated (UTC)</th>
+                                <th style="text-align: right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var file in files)
+                            {
+                                <tr>
+                                    <td class="mono" style="font-weight: 500;">
+                                        <a href="/files/@file.FileId" style="color: var(--accent); text-decoration: none;">
+                                            @file.RelativePath
+                                        </a>
+                                    </td>
+                                    <td>
+                                        <span class="status-badge badge-gray">v@file.CurrentVersionNumber</span>
+                                    </td>
+                                    <td class="mono">
+                                        @(file.CurrentSize.HasValue ? FormatSize(file.CurrentSize.Value) : "—")
+                                    </td>
+                                    <td>
+                                        @if (file.IsDeleted)
+                                        {
+                                            <span class="status-badge badge-red">Deleted</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="status-badge badge-green">Active</span>
+                                        }
+                                    </td>
+                                    <td style="font-size: 0.8rem; color: var(--text-secondary);">
+                                        @file.UpdatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss")
+                                    </td>
+                                    <td style="text-align: right;">
+                                        <a href="/files/@file.FileId" class="btn btn-secondary" style="text-decoration: none; padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+                                            📜 Versions
+                                        </a>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary); display: flex; justify-content: space-between;">
+                    <span>Showing @files.Count file(s)</span>
+                    <span>Total Active: @files.Count(f => !f.IsDeleted) | Total Deleted: @files.Count(f => f.IsDeleted)</span>
+                </div>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    private SyncProfile? activeProfile;
+    private bool isLoadingProfile = true;
+    private bool isLoadingFiles = false;
+    private bool includeDeleted = true;
+    private string? errorMessage;
+    private List<FileMetadataDto> files = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            activeProfile = await ProfileService.GetProfileAsync();
+            if (activeProfile != null)
+            {
+                await LoadFilesAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load active profile");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            isLoadingProfile = false;
+        }
+    }
+
+    private async Task LoadFilesAsync()
+    {
+        if (activeProfile == null) return;
+
+        isLoadingFiles = true;
+        errorMessage = null;
+
+        try
+        {
+            var resp = await BackupService.GetFilesAsync(activeProfile.BackupSetId, includeDeleted);
+            if (resp.Success)
+            {
+                files = resp.Files ?? new();
+            }
+            else
+            {
+                errorMessage = resp.ErrorMessage ?? "Failed to query files from Gateway.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to fetch files from gateway");
+            errorMessage = $"Connection error: {ex.Message}";
+        }
+        finally
+        {
+            isLoadingFiles = false;
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{(bytes / 1024.0):F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{(bytes / (1024.0 * 1024.0)):F2} MB";
+        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)):F2} GB";
+    }
+}

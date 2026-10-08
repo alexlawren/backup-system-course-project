@@ -134,6 +134,7 @@ public class MetadataDbContext : DbContext
             b.Property(p => p.ExpectedVersionNumber).IsRequired();
             b.Property(p => p.ExpectedSize).IsRequired();
             b.Property(p => p.ExpectedSha256).IsRequired().HasMaxLength(64);
+            b.Property(p => p.OperationKind).IsRequired().HasMaxLength(32).HasDefaultValue("NORMAL");
             b.Property(p => p.CreatedAtUtc).IsRequired();
             b.Property(p => p.ExpiresAtUtc).IsRequired();
 

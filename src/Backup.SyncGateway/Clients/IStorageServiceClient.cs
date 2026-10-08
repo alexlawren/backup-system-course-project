@@ -14,4 +14,8 @@ public interface IStorageServiceClient : IAsyncDisposable, IDisposable
         GetStoredFileRequest request,
         Stream destinationStream,
         CancellationToken cancellationToken = default);
+    Task<GetStoredFileResultResponse> StreamStoredFileAsync(
+        GetStoredFileRequest request,
+        Func<GetStoredFileResultResponse, Task<Stream>> prepareDestinationAsync,
+        CancellationToken cancellationToken = default);
 }

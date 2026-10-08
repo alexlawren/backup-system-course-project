@@ -99,6 +99,26 @@ public class GatewaySessionHandler : IAsyncDisposable
                 await HandleFileRenamedAsync(stream, header, cancellationToken);
                 break;
 
+            case MessageType.GetFiles:
+                await HandleGetFilesAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.GetVersions:
+                await HandleGetVersionsAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.GetChangeLog:
+                await HandleGetChangeLogAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.RestoreRequest:
+                await HandleRestoreRequestAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.RestoreCompleted:
+                await HandleRestoreCompletedAsync(stream, header, cancellationToken);
+                break;
+
             default:
                 _logger.LogWarning("[SyncGateway] Unhandled MessageType: {MessageType}", header.MessageType);
                 if (header.BodyLength > 0)
@@ -275,7 +295,8 @@ public class GatewaySessionHandler : IAsyncDisposable
                 BackupSetId = request.BackupSetId,
                 RelativePath = normalizedPath,
                 Size = request.Size,
-                Sha256 = normalizedSha
+                Sha256 = normalizedSha,
+                ChangeOrigin = request.ChangeOrigin
             }, cancellationToken);
         }
         catch (Exception ex)
@@ -760,6 +781,248 @@ public class GatewaySessionHandler : IAsyncDisposable
                 new FileRenamedResponse { Success = false, ErrorMessage = ex.Message },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
         }
+    }
+
+    private async Task HandleGetFilesAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<GetFilesRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FilesResponse,
+                new GetFilesResponse { Success = false, ErrorMessage = "Request body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var result = await _metadataClient.GetFilesAsync(request, cancellationToken);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FilesResponse, result, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to retrieve files from MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.FilesResponse,
+                new GetFilesResponse { Success = false, ErrorMessage = $"Metadata error: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleGetVersionsAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<GetVersionsRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.VersionsResponse,
+                new GetVersionsResponse { Success = false, ErrorMessage = "Request body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var result = await _metadataClient.GetVersionsAsync(request, cancellationToken);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.VersionsResponse, result, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to retrieve versions from MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.VersionsResponse,
+                new GetVersionsResponse { Success = false, ErrorMessage = $"Metadata error: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleGetChangeLogAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<GetChangeLogRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.ChangeLogResponse,
+                new GetChangeLogResponse { Success = false, ErrorMessage = "Request body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var result = await _metadataClient.GetChangeLogsAsync(request, cancellationToken);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.ChangeLogResponse, result, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to retrieve changelog from MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.ChangeLogResponse,
+                new GetChangeLogResponse { Success = false, ErrorMessage = $"Metadata error: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleRestoreRequestAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<RestoreRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse { Success = false, ErrorCode = "INVALID_REQUEST", ErrorMessage = "RestoreRequest body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (_session.ClientId.HasValue && request.ClientId != _session.ClientId.Value)
+        {
+            _logger.LogWarning("[SyncGateway] Restore rejected: ClientId {ReqClientId} does not match active session ClientId {SessionClientId}",
+                request.ClientId, _session.ClientId.Value);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse { Success = false, ErrorCode = "CLIENT_MISMATCH", ErrorMessage = "ClientId does not match active session." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.BackupSetId == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse { Success = false, ErrorCode = "INVALID_BACKUP_SET", ErrorMessage = "BackupSetId cannot be empty." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.FileId == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse { Success = false, ErrorCode = "INVALID_FILE_ID", ErrorMessage = "FileId cannot be empty." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (request.VersionNumber <= 0)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse { Success = false, ErrorCode = "INVALID_VERSION", ErrorMessage = "VersionNumber must be greater than 0." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        // 1. Resolve version from MetadataService
+        ResolveVersionResponse resolveResp;
+        try
+        {
+            resolveResp = await _metadataClient.ResolveVersionAsync(new ResolveVersionRequest
+            {
+                FileId = request.FileId,
+                VersionNumber = request.VersionNumber
+            }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] ResolveVersion failed in MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse { Success = false, ErrorCode = "METADATA_UNAVAILABLE", ErrorMessage = $"MetadataService error: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (!resolveResp.Success || resolveResp.Version == null)
+        {
+            _logger.LogWarning("[SyncGateway] Version resolution failed: {ErrorCode} - {ErrorMessage}", resolveResp.ErrorCode, resolveResp.ErrorMessage);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse
+                {
+                    FileId = request.FileId,
+                    VersionNumber = request.VersionNumber,
+                    Success = false,
+                    ErrorCode = resolveResp.ErrorCode ?? "VERSION_NOT_FOUND",
+                    ErrorMessage = resolveResp.ErrorMessage ?? $"Version {request.VersionNumber} not found."
+                },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(resolveResp.Version.StorageKey))
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady,
+                new RestoreReadyResponse
+                {
+                    FileId = request.FileId,
+                    VersionNumber = request.VersionNumber,
+                    Success = false,
+                    ErrorCode = "RESTORE_STORAGE_MISSING",
+                    ErrorMessage = $"StorageKey missing for version {request.VersionNumber}."
+                },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        _logger.LogInformation("[Restore] Streaming version {Version} of file '{Path}' to client {ClientId} (StorageKey: {StorageKey})",
+            request.VersionNumber, resolveResp.RelativePath, request.ClientId, resolveResp.Version.StorageKey);
+
+        // 2. Stream from StorageService to Client via bounded userspace buffer
+        try
+        {
+            var getResult = await _storageClient.StreamStoredFileAsync(
+                new GetStoredFileRequest { StorageKey = resolveResp.Version.StorageKey },
+                async (storageResult) =>
+                {
+                    // 2a. Send RestoreReady descriptor frame
+                    var ready = new RestoreReadyResponse
+                    {
+                        FileId = resolveResp.FileId,
+                        RelativePath = resolveResp.RelativePath,
+                        VersionNumber = resolveResp.Version.VersionNumber,
+                        Size = storageResult.Size,
+                        Sha256 = storageResult.Sha256 ?? resolveResp.Version.Sha256,
+                        Success = true
+                    };
+                    await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreReady, ready, correlationId: header.MessageId, cancellationToken: cancellationToken);
+
+                    // 2b. Write RestoreFile binary header frame
+                    var restoreFileHeader = new ProtocolHeader
+                    {
+                        Magic = ProtocolConstants.Magic,
+                        ProtocolVersion = ProtocolConstants.Version,
+                        MessageType = MessageType.RestoreFile,
+                        MessageId = Guid.NewGuid(),
+                        CorrelationId = header.MessageId,
+                        ContentType = ProtocolContentTypes.ApplicationOctetStream,
+                        BodyLength = storageResult.Size,
+                        SentAtUtc = DateTime.UtcNow
+                    };
+                    await _writer.WriteHeaderAsync(stream, restoreFileHeader, cancellationToken);
+
+                    // Relay stream directly into client stream
+                    return stream;
+                },
+                cancellationToken);
+
+            if (!getResult.Success)
+            {
+                _logger.LogWarning("[SyncGateway] StorageService download failed: {ErrorCode} - {ErrorMessage}", getResult.ErrorCode, getResult.ErrorMessage);
+            }
+            else
+            {
+                _logger.LogInformation("[Restore] Streamed version {Version} of '{Path}' to client successfully ({Size} bytes)",
+                    request.VersionNumber, resolveResp.RelativePath, getResult.Size);
+            }
+            await stream.FlushAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Streaming restore payload failed: {Message}", ex.Message);
+        }
+    }
+
+    private async Task HandleRestoreCompletedAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var notif = await _reader.ReadJsonBodyAsync<RestoreCompletedNotification>(stream, header.BodyLength, cancellationToken);
+        if (notif != null)
+        {
+            _logger.LogInformation("[Restore] Client {ClientId} completed restore for File {FileId} (v{Source} -> v{New}) - Status: {Status}",
+                notif.ClientId, notif.FileId, notif.RestoredFromVersion, notif.NewVersionNumber, notif.Status);
+        }
+
+        await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreCompleted,
+            new RestoreCompletedResponse { Success = true },
+            correlationId: header.MessageId, cancellationToken: cancellationToken);
     }
 
     private static async Task DrainRemainingAsync(Stream stream, long remainingBytes, CancellationToken cancellationToken)

@@ -18,6 +18,7 @@ builder.Services.AddSingleton<ILocalFileIndexService, LocalFileIndexService>();
 builder.Services.AddSingleton<IFileStabilityHelper, FileStabilityHelper>();
 builder.Services.AddSingleton<IDirectoryScanner, DirectoryScanner>();
 builder.Services.AddSingleton<IFileSystemWatcherService, FileSystemWatcherService>();
+builder.Services.AddSingleton<IRestoreSuppressionService, RestoreSuppressionService>();
 builder.Services.AddSingleton<ISyncEngine, SyncEngine>();
 builder.Services.AddHostedService<ClientStartupSyncWorker>();
 

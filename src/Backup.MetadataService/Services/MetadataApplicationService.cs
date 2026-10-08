@@ -215,6 +215,7 @@ public class MetadataApplicationService : IMetadataApplicationService
             ExpectedVersionNumber = expectedVersionNumber,
             ExpectedSize = request.Size,
             ExpectedSha256 = request.Sha256.Trim(),
+            OperationKind = request.ChangeOrigin == BackupChangeOrigin.Restore ? "RESTORE" : "NORMAL",
             CreatedAtUtc = DateTime.UtcNow,
             ExpiresAtUtc = DateTime.UtcNow.AddMinutes(30)
         };
@@ -352,7 +353,10 @@ public class MetadataApplicationService : IMetadataApplicationService
             file.UpdatedAtUtc = DateTime.UtcNow;
 
             // Create ChangeLog entry
-            string action = pending.ExpectedVersionNumber == 1 ? "CREATE" : "MODIFY";
+            string action = string.Equals(pending.OperationKind, "RESTORE", StringComparison.OrdinalIgnoreCase)
+                ? "RESTORE"
+                : (pending.ExpectedVersionNumber == 1 ? "CREATE" : "MODIFY");
+
             var changeLog = new ChangeLogEntity
             {
                 Id = Guid.NewGuid(),
@@ -361,7 +365,9 @@ public class MetadataApplicationService : IMetadataApplicationService
                 FileId = file.Id,
                 Action = action,
                 Status = "COMMITTED",
-                Details = $"Version {pending.ExpectedVersionNumber} committed with Sha256 {request.ActualSha256}",
+                Details = string.Equals(pending.OperationKind, "RESTORE", StringComparison.OrdinalIgnoreCase)
+                    ? $"Restored version {pending.ExpectedVersionNumber} with Sha256 {request.ActualSha256}"
+                    : $"Version {pending.ExpectedVersionNumber} committed with Sha256 {request.ActualSha256}",
                 CreatedAtUtc = DateTime.UtcNow
             };
             dbContext.ChangeLogs.Add(changeLog);
@@ -607,7 +613,23 @@ public class MetadataApplicationService : IMetadataApplicationService
     {
         await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
 
+        var file = await dbContext.Files
+            .AsNoTracking()
+            .FirstOrDefaultAsync(f => f.Id == request.FileId, cancellationToken);
+
+        if (file == null)
+        {
+            return new ResolveVersionResponse
+            {
+                FileId = request.FileId,
+                Success = false,
+                ErrorCode = "FILE_NOT_FOUND",
+                ErrorMessage = $"File {request.FileId} not found."
+            };
+        }
+
         var fv = await dbContext.FileVersions
+            .AsNoTracking()
             .FirstOrDefaultAsync(v => v.FileId == request.FileId && v.VersionNumber == request.VersionNumber, cancellationToken);
 
         if (fv == null)
@@ -615,15 +637,34 @@ public class MetadataApplicationService : IMetadataApplicationService
             return new ResolveVersionResponse
             {
                 FileId = request.FileId,
+                BackupSetId = file.BackupSetId,
+                RelativePath = file.RelativePath,
                 Version = null,
                 Success = false,
+                ErrorCode = "VERSION_NOT_FOUND",
                 ErrorMessage = $"Version {request.VersionNumber} not found for file {request.FileId}."
+            };
+        }
+
+        if (string.IsNullOrWhiteSpace(fv.StorageKey))
+        {
+            return new ResolveVersionResponse
+            {
+                FileId = request.FileId,
+                BackupSetId = file.BackupSetId,
+                RelativePath = file.RelativePath,
+                Version = null,
+                Success = false,
+                ErrorCode = "RESTORE_STORAGE_MISSING",
+                ErrorMessage = $"StorageKey is missing for version {request.VersionNumber} of file {request.FileId}."
             };
         }
 
         return new ResolveVersionResponse
         {
             FileId = request.FileId,
+            BackupSetId = file.BackupSetId,
+            RelativePath = file.RelativePath,
             Version = new FileVersionDto
             {
                 VersionNumber = fv.VersionNumber,
@@ -632,6 +673,37 @@ public class MetadataApplicationService : IMetadataApplicationService
                 StorageKey = fv.StorageKey,
                 CreatedAtUtc = fv.CreatedAtUtc
             },
+            Success = true
+        };
+    }
+
+    public async Task<GetChangeLogResponse> GetChangeLogsAsync(GetChangeLogRequest request, CancellationToken cancellationToken = default)
+    {
+        await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        int limit = Math.Clamp(request.Limit, 1, 500);
+        var entries = await dbContext.ChangeLogs
+            .Include(cl => cl.File)
+            .Where(cl => cl.BackupSetId == request.BackupSetId)
+            .OrderByDescending(cl => cl.CreatedAtUtc)
+            .Take(limit)
+            .Select(cl => new ChangeLogEntryDto
+            {
+                Id = cl.Id,
+                BackupSetId = cl.BackupSetId,
+                FileId = cl.FileId,
+                RelativePath = cl.File != null ? cl.File.RelativePath : null,
+                Action = cl.Action,
+                Status = cl.Status,
+                Details = cl.Details,
+                CreatedAtUtc = cl.CreatedAtUtc
+            })
+            .ToListAsync(cancellationToken);
+
+        return new GetChangeLogResponse
+        {
+            BackupSetId = request.BackupSetId,
+            Entries = entries,
             Success = true
         };
     }

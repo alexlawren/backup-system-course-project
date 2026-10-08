@@ -235,6 +235,13 @@ namespace Backup.MetadataService.Migrations
                     b.Property<Guid>("FileId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("OperationKind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("NORMAL");
+
                     b.HasKey("OperationId");
 
                     b.HasIndex("ExpiresAtUtc");
