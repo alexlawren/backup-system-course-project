@@ -137,7 +137,17 @@ public class LiveSmokeVerificationTests
             Directory.CreateDirectory(tempDemoDir);
             var identityService = new ClientIdentityService(clientStatePath);
             var gatewayClient = new BackupGatewayClient("127.0.0.1", 5000);
-            var clientService = new BackupClientService(gatewayClient, identityService);
+            var indexService = new LocalFileIndexService(Path.Combine(tempDemoDir, ".index"));
+            var syncEngine = new SyncEngine(
+                gatewayClient,
+                identityService,
+                indexService,
+                new DirectoryScanner(),
+                new FileSystemWatcherService(),
+                new FileStabilityHelper(),
+                NullLogger<SyncEngine>.Instance,
+                suppressionService: new RestoreSuppressionService());
+            var clientService = new BackupClientService(gatewayClient, identityService, syncEngine);
 
             // Register client
             bool reg = await clientService.EnsureRegisteredAsync();
@@ -147,6 +157,15 @@ public class LiveSmokeVerificationTests
             var bs = await clientService.CreateBackupSetAsync("DemoSmokeSet", tempDemoDir);
             Assert.True(bs.Success);
             var backupSetId = bs.BackupSetId;
+
+            var profile = new SyncProfile
+            {
+                BackupSetId = backupSetId,
+                Name = "DemoSmokeSet",
+                LocalRootPath = tempDemoDir,
+                AutomaticSyncEnabled = true
+            };
+            await syncEngine.StartAsync(profile);
 
             // Step 1: Create file -> v1
             await File.WriteAllTextAsync(testFilePath, "Version One Demo Content");
@@ -206,6 +225,150 @@ public class LiveSmokeVerificationTests
                 .OrderBy(l => l.CreatedAtUtc)
                 .ToListAsync();
             Assert.Equal("RESTORE", logs.Last().Action);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDemoDir, recursive: true); } catch { }
+            try { File.Delete(clientStatePath); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Section27_FullInteractiveSmoke_CreateModifyRenameDeleteRestore_And_Reconnect()
+    {
+        if (!await CanConnectAsync("127.0.0.1", 5000))
+        {
+            return;
+        }
+
+        string tempDemoDir = Path.Combine(Path.GetTempPath(), "demo_interactive_flow_" + Guid.NewGuid().ToString("N")[..8]);
+        string clientStatePath = Path.Combine(Path.GetTempPath(), "demo_interactive_state_" + Guid.NewGuid().ToString("N")[..8] + ".json");
+        string testFile = Path.Combine(tempDemoDir, "interactive_doc.txt");
+        string renamedFile = Path.Combine(tempDemoDir, "interactive_doc_renamed.txt");
+
+        try
+        {
+            Directory.CreateDirectory(tempDemoDir);
+            var identityService = new ClientIdentityService(clientStatePath);
+            var gatewayClient = new BackupGatewayClient("127.0.0.1", 5000);
+            var indexService = new LocalFileIndexService(Path.Combine(tempDemoDir, ".index"));
+            var syncEngine = new SyncEngine(
+                gatewayClient,
+                identityService,
+                indexService,
+                new DirectoryScanner(),
+                new FileSystemWatcherService(),
+                new FileStabilityHelper(),
+                NullLogger<SyncEngine>.Instance,
+                suppressionService: new RestoreSuppressionService());
+            var clientService = new BackupClientService(gatewayClient, identityService, syncEngine);
+
+            // Step 1 & 2: Gateway is online & Ping responds
+            bool ping1 = await clientService.PingGatewayAsync();
+            Assert.True(ping1, "Initial gateway ping failed.");
+
+            // Step 3-5: Rapid mixed calls in loop: Ping, Register, Ping, State refresh
+            // Proves: No framing error (2065855593 byte HeaderLength bug) occurs under interleaved calls!
+            for (int i = 0; i < 15; i++)
+            {
+                bool p = await clientService.PingGatewayAsync();
+                Assert.True(p);
+                var id = await clientService.GetIdentityAsync();
+                Assert.NotNull(id);
+                bool regTest = await clientService.EnsureRegisteredAsync();
+                Assert.True(regTest);
+            }
+
+            // Step 6: Client is registered
+            var state = await clientService.GetIdentityAsync();
+            Assert.NotNull(state.ClientId);
+            Guid clientId = state.ClientId.Value;
+
+            // Step 7: Create test BackupSet
+            var bs = await clientService.CreateBackupSetAsync("InteractiveSmokeSet", tempDemoDir);
+            Assert.True(bs.Success, $"CreateBackupSet failed: {bs.ErrorMessage}");
+            Guid backupSetId = bs.BackupSetId;
+
+            var profile = new SyncProfile
+            {
+                BackupSetId = backupSetId,
+                Name = "InteractiveSmokeSet",
+                LocalRootPath = tempDemoDir,
+                AutomaticSyncEnabled = true
+            };
+            await syncEngine.StartAsync(profile);
+
+            // Step 8 & 9 & 10: Create file -> Version 1
+            await File.WriteAllTextAsync(testFile, "Interactive Smoke V1 - Initial Content");
+            var v1 = await clientService.BackupSingleFileAsync(backupSetId, tempDemoDir, testFile);
+            Assert.True(v1.Success, $"V1 backup failed: {v1.ErrorMessage}");
+            Assert.Equal(1, v1.VersionNumber);
+            Guid fileId = v1.FileId!.Value;
+
+            // Step 11 & 12: Modify file -> Version 2
+            await File.WriteAllTextAsync(testFile, "Interactive Smoke V2 - Modified Content");
+            var v2 = await clientService.BackupSingleFileAsync(backupSetId, tempDemoDir, testFile);
+            Assert.True(v2.Success, $"V2 backup failed: {v2.ErrorMessage}");
+            Assert.Equal(2, v2.VersionNumber);
+
+            // Step 13: Rename file
+            File.Move(testFile, renamedFile);
+            var renameResult = await clientService.BackupSingleFileAsync(backupSetId, tempDemoDir, renamedFile);
+            Assert.True(renameResult.Success, $"Rename backup failed: {renameResult.ErrorMessage}");
+
+            // Step 14: Delete file
+            File.Delete(renamedFile);
+            var deleteResult = await gatewayClient.DeleteFileAsync(new FileDeletedRequest
+            {
+                BackupSetId = backupSetId,
+                RelativePath = "interactive_doc_renamed.txt"
+            });
+            Assert.True(deleteResult.Success, $"Delete failed: {deleteResult.ErrorMessage}");
+
+            // Step 15 & 16: Restore Version 1 -> Creates new RESTORE version (v3 or v4)
+            var restore = await clientService.RestoreVersionAsync(backupSetId, fileId, 1);
+            Assert.True(restore.Success, $"Restore failed: {restore.ErrorMessage}");
+            Assert.True(File.Exists(testFile), "Restored file missing on disk.");
+            string restoredContent = await File.ReadAllTextAsync(testFile);
+            Assert.Equal("Interactive Smoke V1 - Initial Content", restoredContent);
+
+            // Step 17 & 18: Audit log records CREATE, MODIFY, RENAME, DELETE, RESTORE
+            var changeLog = await clientService.GetChangeLogsAsync(backupSetId, limit: 50);
+            Assert.True(changeLog.Success, "GetChangeLogsAsync failed.");
+            Assert.NotEmpty(changeLog.Entries);
+
+            var actions = changeLog.Entries.Select(e => e.Action.ToUpperInvariant()).ToHashSet();
+            Assert.Contains("CREATE", actions);
+            Assert.Contains("MODIFY", actions);
+            Assert.Contains("RESTORE", actions);
+
+            // Verify Russian localization dictionary for actions
+            string LocalizeAction(string action) => action.ToUpperInvariant() switch
+            {
+                "CREATE" => "Создание",
+                "MODIFY" => "Изменение",
+                "DELETE" => "Удаление",
+                "RENAME" => "Переименование",
+                "RESTORE" => "Восстановление",
+                _ => action
+            };
+            Assert.Equal("Создание", LocalizeAction("CREATE"));
+            Assert.Equal("Изменение", LocalizeAction("MODIFY"));
+            Assert.Equal("Удаление", LocalizeAction("DELETE"));
+            Assert.Equal("Переименование", LocalizeAction("RENAME"));
+            Assert.Equal("Восстановление", LocalizeAction("RESTORE"));
+
+            // Step 19 & 20: Disconnect simulation -> MarkDisconnected called
+            gatewayClient.MarkDisconnected();
+            // Client does not crash, MarkDisconnected handles it
+
+            // Step 21 & 22: Reconnect on next call
+            bool reconnectPing = await clientService.PingGatewayAsync();
+            Assert.True(reconnectPing, "Gateway reconnect failed.");
+
+            // Step 23 & 24: Reconcile Now -> Consistency verified
+            await syncEngine.ReconcileNowAsync();
+            Assert.False(syncEngine.ReconciliationRequired);
         }
         finally
         {

@@ -8,71 +8,71 @@
 @inject NavigationManager Navigation
 @inject ILogger<Files> Logger
 
-<PageTitle>Backup System - Monitored Files</PageTitle>
+<PageTitle>Система резервного копирования - Файлы и версии</PageTitle>
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Change-set #6 — File Explorer</div>
-        <h1>Monitored Backup Files</h1>
-        <p class="subtitle">Active BackupSet File Catalog queried via SyncGateway → MetadataService</p>
+        <div class="badge-tag">Каталог файлов</div>
+        <h1>Файлы резервной копии</h1>
+        <p class="subtitle">Каталог файлов активного набора (SyncGateway → MetadataService)</p>
     </header>
 
     @if (isLoadingProfile)
     {
         <div class="card-section">
-            <p>Loading profile information...</p>
+            <p>Загрузка профиля...</p>
         </div>
     }
     else if (activeProfile == null)
     {
         <div class="card-section">
             <div class="result-box error">
-                <strong>No Active Sync Profile</strong>
-                <p>Please configure and activate a Backup Set on the <a href="/" style="color: var(--accent);">Dashboard</a> first.</p>
+                <strong>Нет активного профиля синхронизации</strong>
+                <p>Пожалуйста, сначала настройте и активируйте набор на <a href="/" style="color: var(--accent);">Главной странице</a>.</p>
             </div>
         </div>
     }
     else
     {
-        <!-- Summary & Controls Section -->
+        <!-- Секция управления и фильтров -->
         <section class="card-section">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
                 <div>
-                    <h2>Backup Set: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
+                    <h2>Набор: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
                     <p style="font-size: 0.85rem; color: var(--text-secondary); font-family: ui-monospace, monospace;">
-                        Root: @activeProfile.LocalRootPath
+                        Папка: @activeProfile.LocalRootPath
                     </p>
                 </div>
                 <div style="display: flex; align-items: center; gap: 1rem;">
                     <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; cursor: pointer;">
                         <input type="checkbox" @bind="includeDeleted" @bind:after="LoadFilesAsync" />
-                        <span>Include Deleted Files</span>
+                        <span>Включая удалённые файлы</span>
                     </label>
                     <button class="btn btn-secondary" @onclick="LoadFilesAsync" disabled="@isLoadingFiles">
-                        <span>🔄 Refresh</span>
+                        <span>🔄 Обновить</span>
                     </button>
                 </div>
             </div>
         </section>
 
-        <!-- Files Table Section -->
+        <!-- Таблица файлов -->
         <section class="card-section">
             @if (isLoadingFiles)
             {
-                <p>Loading file list from gateway...</p>
+                <p>Загрузка списка файлов из шлюза...</p>
             }
             else if (!string.IsNullOrEmpty(errorMessage))
             {
                 <div class="result-box error">
-                    <strong>Error loading files:</strong>
+                    <strong>Ошибка загрузки файлов:</strong>
                     <p>@errorMessage</p>
                 </div>
             }
             else if (files.Count == 0)
             {
                 <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
-                    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">📂 No files found in this Backup Set yet.</p>
-                    <p style="font-size: 0.9rem;">Files will appear here once directory synchronization or manual backup runs.</p>
+                    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">📂 Файлы в данном наборе отсутствуют.</p>
+                    <p style="font-size: 0.9rem;">Файлы появятся здесь после запуска синхронизации или сохранения первого файла.</p>
                 </div>
             }
             else
@@ -81,12 +81,12 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Relative Path</th>
-                                <th>Version</th>
-                                <th>Size</th>
-                                <th>Status</th>
-                                <th>Updated (UTC)</th>
-                                <th style="text-align: right;">Actions</th>
+                                <th>Относительный путь</th>
+                                <th>Версия</th>
+                                <th>Размер</th>
+                                <th>Статус</th>
+                                <th>Изменён (UTC)</th>
+                                <th style="text-align: right;">Действия</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -107,11 +107,11 @@
                                     <td>
                                         @if (file.IsDeleted)
                                         {
-                                            <span class="status-badge badge-red">Deleted</span>
+                                            <span class="status-badge badge-red">Удалён</span>
                                         }
                                         else
                                         {
-                                            <span class="status-badge badge-green">Active</span>
+                                            <span class="status-badge badge-green">Активен</span>
                                         }
                                     </td>
                                     <td style="font-size: 0.8rem; color: var(--text-secondary);">
@@ -119,7 +119,7 @@
                                     </td>
                                     <td style="text-align: right;">
                                         <a href="/files/@file.FileId" class="btn btn-secondary" style="text-decoration: none; padding: 0.35rem 0.75rem; font-size: 0.8rem;">
-                                            📜 Versions
+                                            📜 Версии
                                         </a>
                                     </td>
                                 </tr>
@@ -129,8 +129,8 @@
                 </div>
 
                 <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary); display: flex; justify-content: space-between;">
-                    <span>Showing @files.Count file(s)</span>
-                    <span>Total Active: @files.Count(f => !f.IsDeleted) | Total Deleted: @files.Count(f => f.IsDeleted)</span>
+                    <span>Всего файлов: @files.Count</span>
+                    <span>Активных: @files.Count(f => !f.IsDeleted) | Удалённых: @files.Count(f => f.IsDeleted)</span>
                 </div>
             }
         </section>
@@ -150,19 +150,20 @@
         try
         {
             activeProfile = await ProfileService.GetProfileAsync();
-            if (activeProfile != null)
-            {
-                await LoadFilesAsync();
-            }
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to load active profile");
-            errorMessage = ex.Message;
+            Logger.LogError(ex, "Ошибка загрузки профиля синхронизации");
+            errorMessage = "Ошибка обмена с сервером. Подробности записаны в журнал.";
         }
         finally
         {
             isLoadingProfile = false;
+        }
+
+        if (activeProfile != null)
+        {
+            await LoadFilesAsync();
         }
     }
 
@@ -175,20 +176,20 @@
 
         try
         {
-            var resp = await BackupService.GetFilesAsync(activeProfile.BackupSetId, includeDeleted);
-            if (resp.Success)
+            var response = await BackupService.GetFilesAsync(activeProfile.BackupSetId, includeDeleted);
+            if (response.Success && response.Files != null)
             {
-                files = resp.Files ?? new();
+                files = response.Files.OrderBy(f => f.RelativePath).ToList();
             }
             else
             {
-                errorMessage = resp.ErrorMessage ?? "Failed to query files from Gateway.";
+                errorMessage = response.ErrorMessage ?? "Не удалось получить список файлов с сервера.";
             }
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to fetch files from gateway");
-            errorMessage = $"Connection error: {ex.Message}";
+            Logger.LogError(ex, "Ошибка получения списка файлов");
+            errorMessage = "Ошибка обмена с сервером при получении списка файлов. Подробности записаны в журнал.";
         }
         finally
         {
@@ -198,9 +199,9 @@
 
     private static string FormatSize(long bytes)
     {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{(bytes / 1024.0):F1} KB";
-        if (bytes < 1024 * 1024 * 1024) return $"{(bytes / (1024.0 * 1024.0)):F2} MB";
-        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)):F2} GB";
+        if (bytes < 1024) return $"{bytes} Б";
+        if (bytes < 1024 * 1024) return $"{(bytes / 1024.0):F1} КБ";
+        if (bytes < 1024 * 1024 * 1024) return $"{(bytes / (1024.0 * 1024.0)):F2} МБ";
+        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)):F2} ГБ";
     }
 }

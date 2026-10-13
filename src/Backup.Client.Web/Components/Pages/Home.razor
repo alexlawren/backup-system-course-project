@@ -7,26 +7,68 @@
 @inject ISyncProfileService ProfileService
 @inject ILogger<Home> Logger
 
-<PageTitle>Backup System - Directory Synchronization Diagnostic</PageTitle>
+<PageTitle>Система резервного копирования - Диагностика и управление</PageTitle>
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Change-set #7 — Final Release / Hardening</div>
-        <h1>Course Project / Backup System</h1>
+        <div class="badge-tag">Курсовой проект — Релиз 1.1</div>
+        <h1>Курсовой проект / Система резервного копирования</h1>
         <p class="subtitle">«Клиент-серверная система резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений»</p>
     </header>
 
-    <!-- Services Status Section -->
+    <!-- Блок Быстрый старт -->
+    <section class="card-section quick-start-card">
+        <h2>🚀 Быстрый старт</h2>
+        <div class="quick-start-steps">
+            <div class="step-item @(isGatewayConnected ? "step-done" : "step-pending")">
+                <span class="step-number">1</span>
+                <div class="step-content">
+                    <strong>Проверьте соединение</strong>
+                    <span>@(isGatewayConnected ? "✅ Шлюз подключен" : "Нажмите «Проверить соединение»")</span>
+                </div>
+            </div>
+            <div class="step-item @(clientState?.ClientId != null && clientState.ClientId != Guid.Empty ? "step-done" : "step-pending")">
+                <span class="step-number">2</span>
+                <div class="step-content">
+                    <strong>Зарегистрируйте клиент</strong>
+                    <span>@(clientState?.ClientId != null && clientState.ClientId != Guid.Empty ? "✅ Зарегистрирован" : "Нажмите «Зарегистрировать клиент»")</span>
+                </div>
+            </div>
+            <div class="step-item @(!string.IsNullOrWhiteSpace(activeLocalRootPath) ? "step-done" : "step-pending")">
+                <span class="step-number">3</span>
+                <div class="step-content">
+                    <strong>Выберите папку</strong>
+                    <span>@(!string.IsNullOrWhiteSpace(activeLocalRootPath) ? "✅ Папка выбрана" : "Укажите локальную папку")</span>
+                </div>
+            </div>
+            <div class="step-item @(activeBackupSetId != Guid.Empty ? "step-done" : "step-pending")">
+                <span class="step-number">4</span>
+                <div class="step-content">
+                    <strong>Сохраните набор</strong>
+                    <span>@(activeBackupSetId != Guid.Empty ? "✅ Набор активен" : "«Сохранить и активировать»")</span>
+                </div>
+            </div>
+            <div class="step-item @(SyncEngine.IsRunning ? "step-done" : "step-pending")">
+                <span class="step-number">5</span>
+                <div class="step-content">
+                    <strong>Запустите синхронизацию</strong>
+                    <span>@(SyncEngine.IsRunning ? "✅ Синхронизация активна" : "«Запустить синхронизацию»")</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Состояние системы -->
     <section class="card-section">
-        <h2>System Architecture & Connectivity</h2>
+        <h2>Состояние системы</h2>
         <div class="status-grid">
             <div class="status-card @(isGatewayConnected ? "active" : "")">
                 <div class="status-indicator @(isGatewayConnected ? "online" : "pending")"></div>
                 <div class="status-info">
-                    <span class="status-name">Sync Gateway</span>
-                    <span class="status-role">TCP Entry Point (127.0.0.1:5000)</span>
+                    <span class="status-name">Шлюз синхронизации</span>
+                    <span class="status-role">TCP точка входа (127.0.0.1:5000)</span>
                     <span class="status-badge @(isGatewayConnected ? "badge-green" : "badge-amber")">
-                        @(isGatewayConnected ? "Online" : "Offline")
+                        @(isGatewayConnected ? "Подключено" : "Нет подключения")
                     </span>
                 </div>
             </div>
@@ -34,10 +76,10 @@
             <div class="status-card @(SyncEngine.IsRunning ? "active" : "")">
                 <div class="status-indicator @(SyncEngine.IsRunning ? "online" : "pending")"></div>
                 <div class="status-info">
-                    <span class="status-name">Automatic Sync</span>
-                    <span class="status-role">FileSystemWatcher + Debounce (~750ms)</span>
+                    <span class="status-name">Автоматическая синхронизация</span>
+                    <span class="status-role">FileSystemWatcher + Debounce (~750 мс)</span>
                     <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
-                        @(SyncEngine.IsRunning ? "Running" : "Stopped")
+                        @(SyncEngine.IsRunning ? "Работает" : "Остановлено")
                     </span>
                 </div>
             </div>
@@ -45,10 +87,10 @@
             <div class="status-card @(SyncEngine.IsReconciling || !SyncEngine.ReconciliationRequired ? "active" : "")">
                 <div class="status-indicator @(SyncEngine.IsReconciling || !SyncEngine.ReconciliationRequired ? "online" : "pending")"></div>
                 <div class="status-info">
-                    <span class="status-name">Reconciliation</span>
-                    <span class="status-role">Server-Client Metadata Sync</span>
+                    <span class="status-name">Согласование данных</span>
+                    <span class="status-role">Сверка метаданных клиент-сервер</span>
                     <span class="status-badge @(SyncEngine.IsReconciling ? "badge-gray" : (!SyncEngine.ReconciliationRequired ? "badge-green" : "badge-amber"))">
-                        @(SyncEngine.IsReconciling ? "Running" : (!SyncEngine.ReconciliationRequired ? "Synced" : "Required"))
+                        @(SyncEngine.IsReconciling ? "Выполняется" : (!SyncEngine.ReconciliationRequired ? "Синхронизировано" : "Требуется"))
                     </span>
                 </div>
             </div>
@@ -56,29 +98,29 @@
 
         <div style="margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
             <button class="btn btn-secondary" @onclick="CheckGatewayConnectionAsync" disabled="@isLoading">
-                <span>🔄 Ping Gateway</span>
+                <span>🔄 Проверить соединение</span>
             </button>
             <button class="btn btn-secondary" @onclick="RefreshStateAsync" disabled="@isLoading">
-                <span>🔄 Refresh UI State</span>
+                <span>🔄 Обновить состояние</span>
             </button>
             <a href="/files" class="btn btn-primary" style="text-decoration: none;">
-                <span>📂 Browse Files &amp; Restore</span>
+                <span>📂 Файлы и восстановление</span>
             </a>
             <a href="/history" class="btn btn-secondary" style="text-decoration: none;">
-                <span>📜 Change Log</span>
+                <span>📜 Журнал изменений</span>
             </a>
         </div>
     </section>
 
-    <!-- Client Identity Section -->
+    <!-- Локальный клиент -->
     <section class="card-section">
-        <h2>Client Identity (Local Station)</h2>
+        <h2>Локальный клиент</h2>
         <div class="diagnostic-section">
             <div class="kv-table">
-                <span class="kv-key">Machine Name:</span>
+                <span class="kv-key">Имя компьютера:</span>
                 <span class="kv-value">@(clientState?.MachineName ?? Environment.MachineName)</span>
 
-                <span class="kv-key">Client ID:</span>
+                <span class="kv-key">Идентификатор клиента (ClientId):</span>
                 <span class="kv-value">
                     @if (clientState?.ClientId != null && clientState.ClientId != Guid.Empty)
                     {
@@ -86,17 +128,17 @@
                     }
                     else
                     {
-                        <span style="color: var(--warning);">Not registered yet</span>
+                        <span style="color: var(--warning);">Ещё не зарегистрирован</span>
                     }
                 </span>
 
-                <span class="kv-key">State Storage:</span>
-                <span class="kv-value">data/client/client-state.json (atomic safe write)</span>
+                <span class="kv-key">Локальное состояние:</span>
+                <span class="kv-value">data/client/client-state.json (атомарная безопасная запись)</span>
             </div>
 
             <div>
                 <button class="btn btn-primary" @onclick="RegisterClientAsync" disabled="@isLoading">
-                    <span>📝 Register Client via Gateway</span>
+                    <span>📝 Зарегистрировать клиент</span>
                 </button>
             </div>
 
@@ -109,70 +151,70 @@
         </div>
     </section>
 
-    <!-- Active Backup Set & Profile Management -->
+    <!-- Набор резервного копирования -->
     <section class="card-section">
-        <h2>Active Monitored Backup Set & Sync Profile</h2>
+        <h2>Набор резервного копирования</h2>
         <div class="diagnostic-section">
             <div class="form-row">
                 <div class="form-group">
-                    <label class="form-label" for="backupSetName">Backup Set Name:</label>
-                    <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="e.g. MyFolder" disabled="@isLoading" />
+                    <label class="form-label" for="backupSetName">Название набора:</label>
+                    <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="Например: РабочиеДокументы" disabled="@isLoading" />
                 </div>
                 <div class="form-group">
-                    <label class="form-label" for="localRootPath">Local Root Directory Path:</label>
-                    <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="e.g. D:\test_backup" disabled="@isLoading" />
+                    <label class="form-label" for="localRootPath">Папка для резервного копирования:</label>
+                    <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="Например: D:\BackupDemo" disabled="@isLoading" />
                 </div>
             </div>
 
             <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
                 <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
-                    <span>📁 Save & Activate Backup Set</span>
+                    <span>📁 Сохранить и активировать</span>
                 </button>
             </div>
 
             <div class="kv-table" style="margin-top: 1rem;">
-                <span class="kv-key">Active Backup Set ID:</span>
+                <span class="kv-key">Идентификатор активного набора:</span>
                 <span class="kv-value">@(activeBackupSetId != Guid.Empty ? activeBackupSetId.ToString() : "—")</span>
 
-                <span class="kv-key">Active Directory:</span>
+                <span class="kv-key">Активная папка:</span>
                 <span class="kv-value">@(SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? "—")</span>
 
-                <span class="kv-key">Automatic Sync Status:</span>
+                <span class="kv-key">Автоматическая синхронизация:</span>
                 <span class="kv-value">
                     <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
-                        @(SyncEngine.IsRunning ? "RUNNING" : "STOPPED")
+                        @(SyncEngine.IsRunning ? "РАБОТАЕТ" : "ОСТАНОВЛЕНО")
                     </span>
                 </span>
 
-                <span class="kv-key">Last Reconciliation:</span>
-                <span class="kv-value">@(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "Never")</span>
+                <span class="kv-key">Последнее согласование:</span>
+                <span class="kv-value">@(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "Никогда")</span>
 
-                <span class="kv-key">Total Files (Server):</span>
+                <span class="kv-key">Файлов на сервере:</span>
                 <span class="kv-value">@(totalFilesCount.HasValue ? totalFilesCount.Value.ToString() : "—")</span>
 
-                <span class="kv-key">Last Sync Result:</span>
-                <span class="kv-value">@(SyncEngine.LastSyncResult ?? "—")</span>
+                <span class="kv-key">Последний результат:</span>
+                <span class="kv-value">@(FormatSyncResult(SyncEngine.LastSyncResult) ?? "—")</span>
 
-                <span class="kv-key">Pending Events (Debounce):</span>
+                <span class="kv-key">Ожидающих событий (Debounce):</span>
                 <span class="kv-value">@SyncEngine.PendingEventCount</span>
 
-                <span class="kv-key">Reconciliation Required:</span>
-                <span class="kv-value" style="color: @(SyncEngine.ReconciliationRequired ? "var(--warning)" : "var(--accent-color)");">
-                    @(SyncEngine.ReconciliationRequired ? "YES (Needs Reconciliation)" : "NO (In Sync)")
+                <span class="kv-key">Требуется согласование:</span>
+                <span class="kv-value" style="color: @(SyncEngine.ReconciliationRequired ? "var(--warning)" : "var(--accent)");">
+                    @(SyncEngine.ReconciliationRequired ? "ДА (требуется согласование)" : "НЕТ (синхронизировано)")
                 </span>
             </div>
 
             <div style="display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap;">
                 <button class="btn btn-primary" @onclick="StartAutomaticSyncAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || SyncEngine.IsRunning)">
-                    <span>▶️ Start Automatic Sync</span>
+                    <span>▶️ Запустить синхронизацию</span>
                 </button>
 
                 <button class="btn btn-secondary" @onclick="StopAutomaticSyncAsync" disabled="@(isLoading || !SyncEngine.IsRunning)">
-                    <span>⏹️ Stop Automatic Sync</span>
+                    <span>⏹️ Остановить синхронизацию</span>
                 </button>
 
                 <button class="btn btn-secondary" @onclick="ReconcileNowAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty)">
-                    <span>⚡ Sync Now (Reconcile)</span>
+                    <span>⚡ Синхронизировать сейчас</span>
                 </button>
             </div>
 
@@ -185,13 +227,13 @@
         </div>
     </section>
 
-    <!-- Recent Sync Activity Log -->
+    <!-- Последние события синхронизации -->
     <section class="card-section">
-        <h2>Recent Synchronization Events (Session Log)</h2>
+        <h2>Последние события синхронизации (Журнал сессии)</h2>
         <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 0.75rem; max-height: 250px; overflow-y: auto; font-family: monospace; font-size: 0.85rem;">
             @if (SyncEngine.RecentEvents.Count == 0)
             {
-                <span style="color: var(--text-secondary);">No events recorded in current session.</span>
+                <span style="color: var(--text-secondary);">События в текущей сессии отсутствуют.</span>
             }
             else
             {
@@ -205,18 +247,18 @@
         </div>
     </section>
 
-    <!-- Manual File Backup Test Section (Preserved for compatibility) -->
+    <!-- Ручная проверка резервного копирования одного файла -->
     <section class="card-section">
-        <h2>Manual File Backup Test (Single File)</h2>
+        <h2>Ручная проверка резервного копирования (Один файл)</h2>
         <div class="diagnostic-section">
             <div class="form-group">
-                <label class="form-label" for="manualFilePath">Absolute Local File Path:</label>
-                <input id="manualFilePath" class="form-input" @bind="manualFilePath" placeholder="e.g. C:\backup_data\test.txt" disabled="@isLoading" />
+                <label class="form-label" for="manualFilePath">Полный путь к локальному файлу:</label>
+                <input id="manualFilePath" class="form-input" @bind="manualFilePath" placeholder="Например: D:\BackupDemo\test.txt" disabled="@isLoading" />
             </div>
 
             <div>
                 <button class="btn btn-primary" @onclick="BackupSingleFileAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))">
-                    <span>🚀 Backup Single File</span>
+                    <span>🚀 Резервировать файл</span>
                 </button>
             </div>
 
@@ -225,29 +267,29 @@
                 <div class="result-box @(backupOperationResult.Success ? "success" : "error")">
                     <div style="display: flex; align-items: center; justify-content: space-between;">
                         <span style="font-weight: 600; font-size: 1.05rem;">
-                            @(backupOperationResult.Success ? "✅ Backup Completed Successfully" : "❌ Backup Failed")
+                            @(backupOperationResult.Success ? "✅ Файл успешно сохранён" : "❌ Ошибка резервного копирования")
                         </span>
                         <span class="status-badge @(backupOperationResult.Success ? "badge-green" : "badge-red")">
-                            @(backupOperationResult.Success ? "SUCCESS" : backupOperationResult.ErrorCode ?? "ERROR")
+                            @(backupOperationResult.Success ? "УСПЕШНО" : backupOperationResult.ErrorCode ?? "ОШИБКА")
                         </span>
                     </div>
 
                     <div class="kv-table">
-                        <span class="kv-key">File ID:</span>
+                        <span class="kv-key">Идентификатор файла (FileId):</span>
                         <span class="kv-value">@(backupOperationResult.FileId?.ToString() ?? "—")</span>
 
-                        <span class="kv-key">Version:</span>
+                        <span class="kv-key">Версия:</span>
                         <span class="kv-value">@(backupOperationResult.VersionNumber?.ToString() ?? "—")</span>
 
-                        <span class="kv-key">Storage Key:</span>
+                        <span class="kv-key">Ключ хранилища:</span>
                         <span class="kv-value">@(backupOperationResult.StorageKey ?? "—")</span>
 
                         @if (!backupOperationResult.Success)
                         {
-                            <span class="kv-key">Error Code:</span>
+                            <span class="kv-key">Код ошибки:</span>
                             <span class="kv-value" style="color: #f87171;">@backupOperationResult.ErrorCode</span>
 
-                            <span class="kv-key">Error Message:</span>
+                            <span class="kv-key">Сообщение:</span>
                             <span class="kv-value" style="color: #f87171;">@backupOperationResult.ErrorMessage</span>
                         }
                     </div>
@@ -256,25 +298,25 @@
         </div>
     </section>
 
-    <!-- Protocol Specs Summary -->
+    <!-- Спецификация протокола -->
     <section class="card-section protocol-overview">
-        <h2>TCP Protocol v1 Specifications</h2>
+        <h2>Спецификация протокола TCP Protocol v1</h2>
         <div class="protocol-grid">
             <div class="protocol-item">
-                <span class="label">Magic Marker</span>
+                <span class="label">Сигнатура (Magic)</span>
                 <span class="val">BKP1</span>
             </div>
             <div class="protocol-item">
-                <span class="label">Protocol Version</span>
+                <span class="label">Версия протокола</span>
                 <span class="val">1</span>
             </div>
             <div class="protocol-item">
-                <span class="label">Framing Structure</span>
-                <span class="val">[4B HeaderLen BigEndian] [JSON Header ≤ 64 KiB] [BodyStream]</span>
+                <span class="label">Структура фрейма</span>
+                <span class="val">[4Б HeaderLen BigEndian] [JSON Заголовок ≤ 64 KiB] [Тело/Поток]</span>
             </div>
             <div class="protocol-item">
-                <span class="label">Transport Layer</span>
-                <span class="val">Raw TCP Sockets (Streaming Relay without Full-File Buffering)</span>
+                <span class="label">Транспортный уровень</span>
+                <span class="val">Raw TCP сокеты (потоковая передача без полной буферизации файлов)</span>
             </div>
         </div>
     </section>
@@ -312,9 +354,11 @@
                 localRootPath = profile.LocalRootPath;
                 activeLocalRootPath = profile.LocalRootPath;
             }
-            else if (string.IsNullOrEmpty(localRootPath))
+            else
             {
-                localRootPath = Path.Combine(AppContext.BaseDirectory, "demo_sync");
+                // Section 18: Never use source project directory as default backup root.
+                // Keep localRootPath empty when no profile exists.
+                localRootPath = "";
             }
 
             await CheckGatewayConnectionAsync();
@@ -322,7 +366,7 @@
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error initializing diagnostic UI");
+            Logger.LogError(ex, "Ошибка инициализации интерфейса");
         }
     }
 
@@ -352,8 +396,9 @@
                     totalFilesCount = filesResp.Files.Count;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Logger.LogWarning(ex, "Не удалось загрузить количество файлов на сервере");
                 totalFilesCount = null;
             }
         }
@@ -365,6 +410,11 @@
         try
         {
             isGatewayConnected = await BackupService.PingGatewayAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Ошибка проверки соединения со шлюзом");
+            isGatewayConnected = false;
         }
         finally
         {
@@ -382,18 +432,19 @@
             if (success)
             {
                 clientState = await BackupService.GetIdentityAsync();
-                clientStatusMessage = $"Client successfully registered! ClientId: {clientState.ClientId}";
+                clientStatusMessage = $"Клиент успешно зарегистрирован! Идентификатор: {clientState.ClientId}";
                 clientStatusIsError = false;
             }
             else
             {
-                clientStatusMessage = "Registration failed: Gateway or downstream error.";
+                clientStatusMessage = "Ошибка регистрации: сервис метаданных или шлюз недоступен.";
                 clientStatusIsError = true;
             }
         }
         catch (Exception ex)
         {
-            clientStatusMessage = $"Error: {ex.Message}";
+            Logger.LogError(ex, "Ошибка при регистрации клиента");
+            clientStatusMessage = "Ошибка обмена с сервером при регистрации. Подробности записаны в журнал.";
             clientStatusIsError = true;
         }
         finally
@@ -407,7 +458,6 @@
         if (string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))
             return;
 
-        // Backend directory existence validation (Section 24)
         if (!Directory.Exists(localRootPath))
         {
             try
@@ -416,7 +466,7 @@
             }
             catch (Exception ex)
             {
-                backupSetMessage = $"Invalid LocalRootPath: Directory does not exist and cannot be created ({ex.Message})";
+                backupSetMessage = $"Недопустимый путь к папке: директория не существует и не может быть создана ({ex.Message})";
                 backupSetIsError = true;
                 return;
             }
@@ -441,18 +491,19 @@
                 };
                 await ProfileService.SaveProfileAsync(profile);
 
-                backupSetMessage = $"Backup set '{response.Name}' created and activated!";
+                backupSetMessage = $"Набор резервного копирования '{response.Name}' успешно создан и активирован!";
                 backupSetIsError = false;
             }
             else
             {
-                backupSetMessage = $"Failed to create backup set: {response.ErrorMessage ?? "Unknown error"}";
+                backupSetMessage = $"Не удалось создать набор: {response.ErrorMessage ?? "Неизвестная ошибка"}";
                 backupSetIsError = true;
             }
         }
         catch (Exception ex)
         {
-            backupSetMessage = $"Error: {ex.Message}";
+            Logger.LogError(ex, "Ошибка при создании набора резервного копирования");
+            backupSetMessage = "Ошибка обмена с сервером при создании набора. Подробности записаны в журнал.";
             backupSetIsError = true;
         }
         finally
@@ -465,14 +516,14 @@
     {
         if (activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(activeLocalRootPath))
         {
-            backupSetMessage = "Please create or activate a backup set first.";
+            backupSetMessage = "Сначала создайте или активируйте набор резервного копирования.";
             backupSetIsError = true;
             return;
         }
 
         if (!Directory.Exists(activeLocalRootPath))
         {
-            backupSetMessage = $"Directory '{activeLocalRootPath}' does not exist.";
+            backupSetMessage = $"Директория '{activeLocalRootPath}' не существует.";
             backupSetIsError = true;
             return;
         }
@@ -490,12 +541,13 @@
             await ProfileService.SaveProfileAsync(profile);
 
             await SyncEngine.StartAsync(profile);
-            backupSetMessage = "Automatic synchronization started.";
+            backupSetMessage = "Автоматическая синхронизация запущена.";
             backupSetIsError = false;
         }
         catch (Exception ex)
         {
-            backupSetMessage = $"Failed to start automatic sync: {ex.Message}";
+            Logger.LogError(ex, "Ошибка при запуске автоматической синхронизации");
+            backupSetMessage = "Ошибка запуска синхронизации. Подробности записаны в журнал.";
             backupSetIsError = true;
         }
         finally
@@ -518,12 +570,13 @@
                 await ProfileService.SaveProfileAsync(profile);
             }
 
-            backupSetMessage = "Automatic synchronization stopped.";
+            backupSetMessage = "Автоматическая синхронизация остановлена.";
             backupSetIsError = false;
         }
         catch (Exception ex)
         {
-            backupSetMessage = $"Error stopping sync: {ex.Message}";
+            Logger.LogError(ex, "Ошибка при остановке синхронизации");
+            backupSetMessage = "Ошибка остановки синхронизации. Подробности записаны в журнал.";
             backupSetIsError = true;
         }
         finally
@@ -539,12 +592,13 @@
         {
             await SyncEngine.ReconcileNowAsync();
             await LoadTotalFilesCountAsync();
-            backupSetMessage = "Reconciliation finished.";
+            backupSetMessage = "Согласование данных успешно завершено.";
             backupSetIsError = false;
         }
         catch (Exception ex)
         {
-            backupSetMessage = $"Reconciliation failed: {ex.Message}";
+            Logger.LogError(ex, "Ошибка согласования данных");
+            backupSetMessage = "Ошибка согласования данных. Подробности записаны в журнал.";
             backupSetIsError = true;
         }
         finally
@@ -567,16 +621,27 @@
         }
         catch (Exception ex)
         {
+            Logger.LogError(ex, "Ошибка резервного копирования файла");
             backupOperationResult = new UploadCompletedResponse
             {
                 Success = false,
                 ErrorCode = "CLIENT_EXCEPTION",
-                ErrorMessage = ex.Message
+                ErrorMessage = "Ошибка обмена с сервером при передаче файла. Подробности записаны в журнал."
             };
         }
         finally
         {
             isLoading = false;
         }
+    }
+
+    private static string? FormatSyncResult(string? result)
+    {
+        if (string.IsNullOrEmpty(result)) return null;
+        if (result.Contains("All files in sync", StringComparison.OrdinalIgnoreCase))
+            return "Все файлы согласованы";
+        if (result.Contains("completed", StringComparison.OrdinalIgnoreCase))
+            return "Согласование завершено";
+        return result;
     }
 }

@@ -6,27 +6,27 @@
 @inject ISyncProfileService ProfileService
 @inject ILogger<History> Logger
 
-<PageTitle>Backup System - Change Log History</PageTitle>
+<PageTitle>Система резервного копирования - Журнал изменений</PageTitle>
 
 <div class="system-container">
     <header class="system-header">
-        <div class="badge-tag">Audit Trail — PostgreSQL Change Log</div>
-        <h1>System Change Log History</h1>
-        <p class="subtitle">Complete journal of changes: CREATE, MODIFY, RENAME, DELETE, and RESTORE</p>
+        <div class="badge-tag">Аудит — Журнал изменений PostgreSQL</div>
+        <h1>Журнал изменений</h1>
+        <p class="subtitle">Полный журнал аудита изменений: Создание, Изменение, Переименование, Удаление и Восстановление</p>
     </header>
 
     @if (isLoadingProfile)
     {
         <div class="card-section">
-            <p>Loading profile information...</p>
+            <p>Загрузка профиля...</p>
         </div>
     }
     else if (activeProfile == null)
     {
         <div class="card-section">
             <div class="result-box error">
-                <strong>No Active Sync Profile</strong>
-                <p>Please configure a Backup Set profile on the <a href="/" style="color: var(--accent);">Dashboard</a> first.</p>
+                <strong>Нет активного профиля синхронизации</strong>
+                <p>Пожалуйста, сначала настройте набор на <a href="/" style="color: var(--accent);">Главной странице</a>.</p>
             </div>
         </div>
     }
@@ -35,25 +35,25 @@
         <section class="card-section">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
                 <div>
-                    <h2>Change Log: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
+                    <h2>Журнал изменений: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
                     <p style="font-size: 0.85rem; color: var(--text-secondary);">
-                        Queried through SyncGateway → MetadataService (Immutable Audit Records)
+                        Запрос через SyncGateway → MetadataService (неизменяемые аудит-записи)
                     </p>
                 </div>
                 <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
                     <div style="display: flex; gap: 0.5rem; align-items: center;">
-                        <label for="actionFilter" style="font-size: 0.85rem; color: var(--text-secondary);">Action Filter:</label>
+                        <label for="actionFilter" style="font-size: 0.85rem; color: var(--text-secondary);">Фильтр действий:</label>
                         <select id="actionFilter" class="form-input" style="width: auto; padding: 0.35rem 0.75rem;" @bind="selectedAction">
-                            <option value="">ALL</option>
-                            <option value="CREATE">CREATE</option>
-                            <option value="MODIFY">MODIFY</option>
-                            <option value="RENAME">RENAME</option>
-                            <option value="DELETE">DELETE</option>
-                            <option value="RESTORE">RESTORE</option>
+                            <option value="">Все действия</option>
+                            <option value="CREATE">Создание</option>
+                            <option value="MODIFY">Изменение</option>
+                            <option value="RENAME">Переименование</option>
+                            <option value="DELETE">Удаление</option>
+                            <option value="RESTORE">Восстановление</option>
                         </select>
                     </div>
                     <button class="btn btn-secondary" @onclick="LoadLogAsync" disabled="@isLoadingLog">
-                        <span>🔄 Refresh Log</span>
+                        <span>🔄 Обновить журнал</span>
                     </button>
                 </div>
             </div>
@@ -62,18 +62,18 @@
         <section class="card-section">
             @if (isLoadingLog)
             {
-                <p>Loading change log records...</p>
+                <p>Загрузка записей журнала...</p>
             }
             else if (!string.IsNullOrEmpty(errorMessage))
             {
                 <div class="result-box error">
-                    <strong>Error:</strong>
+                    <strong>Ошибка:</strong>
                     <p>@errorMessage</p>
                 </div>
             }
             else if (entries.Count == 0)
             {
-                <p style="color: var(--text-secondary); text-align: center; padding: 2rem;">No change log entries found yet.</p>
+                <p style="color: var(--text-secondary); text-align: center; padding: 2rem;">Записи в журнале изменений отсутствуют.</p>
             }
             else
             {
@@ -81,11 +81,11 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Timestamp (UTC)</th>
-                                <th>Action</th>
-                                <th>File / Path</th>
-                                <th>Status</th>
-                                <th>Details</th>
+                                <th>Время (UTC)</th>
+                                <th>Действие</th>
+                                <th>Файл / Путь</th>
+                                <th>Статус</th>
+                                <th>Подробности</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -97,7 +97,7 @@
                                     </td>
                                     <td>
                                         <span class="status-badge @GetActionBadgeClass(entry.Action)">
-                                            @entry.Action
+                                            @FormatActionDisplay(entry.Action)
                                         </span>
                                     </td>
                                     <td class="mono">
@@ -117,7 +117,7 @@
                                         }
                                     </td>
                                     <td>
-                                        <span class="status-badge badge-gray">@entry.Status</span>
+                                        <span class="status-badge badge-gray">@FormatStatusDisplay(entry.Status)</span>
                                     </td>
                                     <td style="font-size: 0.85rem; color: var(--text-secondary);">
                                         @(entry.Details ?? "—")
@@ -129,7 +129,7 @@
                 </div>
 
                 <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary);">
-                    <span>Displaying @filteredEntries.Count() of @entries.Count journal entries</span>
+                    <span>Отображается @filteredEntries.Count() из @entries.Count записей журнала</span>
                 </div>
             }
         </section>
@@ -154,19 +154,20 @@
         try
         {
             activeProfile = await ProfileService.GetProfileAsync();
-            if (activeProfile != null)
-            {
-                await LoadLogAsync();
-            }
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to load active profile");
-            errorMessage = ex.Message;
+            Logger.LogError(ex, "Ошибка получения профиля синхронизации");
+            errorMessage = "Ошибка обмена с сервером. Подробности записаны в журнал.";
         }
         finally
         {
             isLoadingProfile = false;
+        }
+
+        if (activeProfile != null)
+        {
+            await LoadLogAsync();
         }
     }
 
@@ -179,20 +180,20 @@
 
         try
         {
-            var resp = await BackupService.GetChangeLogsAsync(activeProfile.BackupSetId, limit: 200);
-            if (resp.Success)
+            var response = await BackupService.GetChangeLogsAsync(activeProfile.BackupSetId, limit: 200);
+            if (response.Success && response.Entries != null)
             {
-                entries = resp.Entries ?? new();
+                entries = response.Entries.OrderByDescending(e => e.CreatedAtUtc).ToList();
             }
             else
             {
-                errorMessage = resp.ErrorMessage ?? "Failed to query change log from gateway.";
+                errorMessage = response.ErrorMessage ?? "Не удалось загрузить журнал изменений.";
             }
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to load changelog");
-            errorMessage = ex.Message;
+            Logger.LogError(ex, "Ошибка загрузки журнала изменений");
+            errorMessage = "Ошибка обмена с сервером при получении журнала. Подробности записаны в журнал.";
         }
         finally
         {
@@ -200,12 +201,30 @@
         }
     }
 
+    private static string FormatActionDisplay(string action) => action.ToUpperInvariant() switch
+    {
+        "CREATE" => "Создание",
+        "MODIFY" => "Изменение",
+        "DELETE" => "Удаление",
+        "RENAME" => "Переименование",
+        "RESTORE" => "Восстановление",
+        _ => action
+    };
+
+    private static string FormatStatusDisplay(string status) => status.ToUpperInvariant() switch
+    {
+        "SUCCESS" => "Успешно",
+        "FAILED" => "Ошибка",
+        "PENDING" => "В обработке",
+        _ => status
+    };
+
     private static string GetActionBadgeClass(string action) => action.ToUpperInvariant() switch
     {
         "CREATE" => "badge-green",
-        "MODIFY" => "badge-gray",
-        "RENAME" => "badge-amber",
+        "MODIFY" => "badge-amber",
         "DELETE" => "badge-red",
+        "RENAME" => "badge-gray",
         "RESTORE" => "badge-green",
         _ => "badge-gray"
     };

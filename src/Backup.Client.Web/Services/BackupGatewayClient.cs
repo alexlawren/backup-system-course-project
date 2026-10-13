@@ -98,7 +98,11 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
                     await _writer.WriteJsonFrameAsync(_stream, MessageType.Hello, req, cancellationToken: cancellationToken);
                     var respHeader = await _reader.ReadHeaderAsync(_stream, cancellationToken);
-                    if (respHeader != null && respHeader.MessageType == MessageType.HelloAck)
+                    if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
+                    {
+                        throw new ProtocolException($"Gateway handshake failed: unexpected response '{respHeader?.MessageType}'.");
+                    }
+                    if (respHeader.BodyLength > 0)
                     {
                         await _reader.ReadJsonBodyAsync<HelloResponse>(_stream, respHeader.BodyLength, cancellationToken);
                     }
@@ -177,7 +181,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
             return await _reader.ReadJsonBodyAsync<HelloResponse>(_stream!, respHeader.BodyLength, cancellationToken);
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -201,6 +205,12 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
                 MarkDisconnected();
                 return false;
             }
+
+            if (respHeader.BodyLength > 0)
+            {
+                await _reader.ReadBodyBytesAsync(_stream!, respHeader.BodyLength, cancellationToken);
+            }
+
             return respHeader.MessageType == MessageType.Pong;
         }
         catch
@@ -249,7 +259,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             }
             return result ?? new RegisterClientResponse { Success = false, ErrorMessage = "Empty RegisterClient response." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -291,7 +301,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<CreateBackupSetResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new CreateBackupSetResponse { Success = false, ErrorMessage = "Empty CreateBackupSet response." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -338,7 +348,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<SyncPlanResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new SyncPlanResponse { Success = false, ErrorMessage = "Empty SyncPlan response." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -385,7 +395,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<FileDeletedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new FileDeletedResponse { Success = false, ErrorMessage = "Empty FileDeleted response." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -432,7 +442,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<FileRenamedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new FileRenamedResponse { Success = false, ErrorMessage = "Empty FileRenamed response." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -608,7 +618,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
                 ErrorMessage = "Empty UploadCompleted response received."
             };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -651,7 +661,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<GetFilesResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new GetFilesResponse { Success = false, ErrorMessage = "Empty FilesResponse received." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -694,7 +704,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<GetVersionsResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new GetVersionsResponse { Success = false, ErrorMessage = "Empty VersionsResponse received." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -737,7 +747,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<GetChangeLogResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new GetChangeLogResponse { Success = false, ErrorMessage = "Empty ChangeLogResponse received." };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
@@ -965,7 +975,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
             var result = await _reader.ReadJsonBodyAsync<RestoreCompletedResponse>(_stream!, respHeader.BodyLength, cancellationToken);
             return result ?? new RestoreCompletedResponse { Success = true };
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception)
         {
             MarkDisconnected();
             throw;
