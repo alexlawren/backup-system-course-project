@@ -7,320 +7,317 @@
 @inject ISyncProfileService ProfileService
 @inject ILogger<Home> Logger
 
-<PageTitle>Система резервного копирования - Диагностика и управление</PageTitle>
+<PageTitle>Система резервного копирования</PageTitle>
 
-<div class="system-container">
-    <header class="system-header">
-        <div class="badge-tag">Курсовой проект — Релиз 1.1</div>
-        <h1>Курсовой проект / Система резервного копирования</h1>
-        <p class="subtitle">«Клиент-серверная система резервного копирования файлов с автоматической синхронизацией и ведением журнала изменений»</p>
-    </header>
-
-    <!-- Блок Быстрый старт -->
-    <section class="card-section quick-start-card">
-        <h2>🚀 Быстрый старт</h2>
-        <div class="quick-start-steps">
-            <div class="step-item @(isGatewayConnected ? "step-done" : "step-pending")">
-                <span class="step-number">1</span>
-                <div class="step-content">
-                    <strong>Проверьте соединение</strong>
-                    <span>@(isGatewayConnected ? "✅ Шлюз подключен" : "Нажмите «Проверить соединение»")</span>
-                </div>
-            </div>
-            <div class="step-item @(clientState?.ClientId != null && clientState.ClientId != Guid.Empty ? "step-done" : "step-pending")">
-                <span class="step-number">2</span>
-                <div class="step-content">
-                    <strong>Зарегистрируйте клиент</strong>
-                    <span>@(clientState?.ClientId != null && clientState.ClientId != Guid.Empty ? "✅ Зарегистрирован" : "Нажмите «Зарегистрировать клиент»")</span>
-                </div>
-            </div>
-            <div class="step-item @(!string.IsNullOrWhiteSpace(activeLocalRootPath) ? "step-done" : "step-pending")">
-                <span class="step-number">3</span>
-                <div class="step-content">
-                    <strong>Выберите папку</strong>
-                    <span>@(!string.IsNullOrWhiteSpace(activeLocalRootPath) ? "✅ Папка выбрана" : "Укажите локальную папку")</span>
-                </div>
-            </div>
-            <div class="step-item @(activeBackupSetId != Guid.Empty ? "step-done" : "step-pending")">
-                <span class="step-number">4</span>
-                <div class="step-content">
-                    <strong>Сохраните набор</strong>
-                    <span>@(activeBackupSetId != Guid.Empty ? "✅ Набор активен" : "«Сохранить и активировать»")</span>
-                </div>
-            </div>
-            <div class="step-item @(SyncEngine.IsRunning ? "step-done" : "step-pending")">
-                <span class="step-number">5</span>
-                <div class="step-content">
-                    <strong>Запустите синхронизацию</strong>
-                    <span>@(SyncEngine.IsRunning ? "✅ Синхронизация активна" : "«Запустить синхронизацию»")</span>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Состояние системы -->
-    <section class="card-section">
-        <h2>Состояние системы</h2>
-        <div class="status-grid">
-            <div class="status-card @(isGatewayConnected ? "active" : "")">
-                <div class="status-indicator @(isGatewayConnected ? "online" : "pending")"></div>
-                <div class="status-info">
-                    <span class="status-name">Шлюз синхронизации</span>
-                    <span class="status-role">TCP точка входа (127.0.0.1:5000)</span>
-                    <span class="status-badge @(isGatewayConnected ? "badge-green" : "badge-amber")">
-                        @(isGatewayConnected ? "Подключено" : "Нет подключения")
-                    </span>
-                </div>
-            </div>
-
-            <div class="status-card @(SyncEngine.IsRunning ? "active" : "")">
-                <div class="status-indicator @(SyncEngine.IsRunning ? "online" : "pending")"></div>
-                <div class="status-info">
-                    <span class="status-name">Автоматическая синхронизация</span>
-                    <span class="status-role">FileSystemWatcher + Debounce (~750 мс)</span>
-                    <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
-                        @(SyncEngine.IsRunning ? "Работает" : "Остановлено")
-                    </span>
-                </div>
-            </div>
-
-            <div class="status-card @(SyncEngine.IsReconciling || !SyncEngine.ReconciliationRequired ? "active" : "")">
-                <div class="status-indicator @(SyncEngine.IsReconciling || !SyncEngine.ReconciliationRequired ? "online" : "pending")"></div>
-                <div class="status-info">
-                    <span class="status-name">Согласование данных</span>
-                    <span class="status-role">Сверка метаданных клиент-сервер</span>
-                    <span class="status-badge @(SyncEngine.IsReconciling ? "badge-gray" : (!SyncEngine.ReconciliationRequired ? "badge-green" : "badge-amber"))">
-                        @(SyncEngine.IsReconciling ? "Выполняется" : (!SyncEngine.ReconciliationRequired ? "Синхронизировано" : "Требуется"))
-                    </span>
-                </div>
-            </div>
-        </div>
-
-        <div style="margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
-            <button class="btn btn-secondary" @onclick="CheckGatewayConnectionAsync" disabled="@isLoading">
-                <span>🔄 Проверить соединение</span>
-            </button>
-            <button class="btn btn-secondary" @onclick="RefreshStateAsync" disabled="@isLoading">
-                <span>🔄 Обновить состояние</span>
-            </button>
-            <a href="/files" class="btn btn-primary" style="text-decoration: none;">
-                <span>📂 Файлы и восстановление</span>
-            </a>
-            <a href="/history" class="btn btn-secondary" style="text-decoration: none;">
-                <span>📜 Журнал изменений</span>
-            </a>
-        </div>
-    </section>
-
-    <!-- Локальный клиент -->
-    <section class="card-section">
-        <h2>Локальный клиент</h2>
-        <div class="diagnostic-section">
-            <div class="kv-table">
-                <span class="kv-key">Имя компьютера:</span>
-                <span class="kv-value">@(clientState?.MachineName ?? Environment.MachineName)</span>
-
-                <span class="kv-key">Идентификатор клиента (ClientId):</span>
-                <span class="kv-value">
-                    @if (clientState?.ClientId != null && clientState.ClientId != Guid.Empty)
-                    {
-                        @clientState.ClientId
-                    }
-                    else
-                    {
-                        <span style="color: var(--warning);">Ещё не зарегистрирован</span>
-                    }
-                </span>
-
-                <span class="kv-key">Локальное состояние:</span>
-                <span class="kv-value">data/client/client-state.json (атомарная безопасная запись)</span>
-            </div>
-
-            <div>
-                <button class="btn btn-primary" @onclick="RegisterClientAsync" disabled="@isLoading">
-                    <span>📝 Зарегистрировать клиент</span>
-                </button>
-            </div>
-
-            @if (!string.IsNullOrEmpty(clientStatusMessage))
-            {
-                <div class="status-badge @(clientStatusIsError ? "badge-amber" : "badge-green")">
-                    @clientStatusMessage
-                </div>
-            }
-        </div>
-    </section>
-
-    <!-- Набор резервного копирования -->
-    <section class="card-section">
-        <h2>Набор резервного копирования</h2>
-        <div class="diagnostic-section">
-            <div class="form-row">
-                <div class="form-group">
-                    <label class="form-label" for="backupSetName">Название набора:</label>
-                    <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="Например: РабочиеДокументы" disabled="@isLoading" />
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="localRootPath">Папка для резервного копирования:</label>
-                    <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="Например: D:\BackupDemo" disabled="@isLoading" />
-                </div>
-            </div>
-
-            <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
-                <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
-                    <span>📁 Сохранить и активировать</span>
-                </button>
-            </div>
-
-            <div class="kv-table" style="margin-top: 1rem;">
-                <span class="kv-key">Идентификатор активного набора:</span>
-                <span class="kv-value">@(activeBackupSetId != Guid.Empty ? activeBackupSetId.ToString() : "—")</span>
-
-                <span class="kv-key">Активная папка:</span>
-                <span class="kv-value">@(SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? "—")</span>
-
-                <span class="kv-key">Автоматическая синхронизация:</span>
-                <span class="kv-value">
-                    <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-amber")">
-                        @(SyncEngine.IsRunning ? "РАБОТАЕТ" : "ОСТАНОВЛЕНО")
-                    </span>
-                </span>
-
-                <span class="kv-key">Последнее согласование:</span>
-                <span class="kv-value">@(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "Никогда")</span>
-
-                <span class="kv-key">Файлов на сервере:</span>
-                <span class="kv-value">@(totalFilesCount.HasValue ? totalFilesCount.Value.ToString() : "—")</span>
-
-                <span class="kv-key">Последний результат:</span>
-                <span class="kv-value">@(FormatSyncResult(SyncEngine.LastSyncResult) ?? "—")</span>
-
-                <span class="kv-key">Ожидающих событий (Debounce):</span>
-                <span class="kv-value">@SyncEngine.PendingEventCount</span>
-
-                <span class="kv-key">Требуется согласование:</span>
-                <span class="kv-value" style="color: @(SyncEngine.ReconciliationRequired ? "var(--warning)" : "var(--accent)");">
-                    @(SyncEngine.ReconciliationRequired ? "ДА (требуется согласование)" : "НЕТ (синхронизировано)")
-                </span>
-            </div>
-
-            <div style="display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap;">
-                <button class="btn btn-primary" @onclick="StartAutomaticSyncAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || SyncEngine.IsRunning)">
-                    <span>▶️ Запустить синхронизацию</span>
-                </button>
-
-                <button class="btn btn-secondary" @onclick="StopAutomaticSyncAsync" disabled="@(isLoading || !SyncEngine.IsRunning)">
-                    <span>⏹️ Остановить синхронизацию</span>
-                </button>
-
-                <button class="btn btn-secondary" @onclick="ReconcileNowAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty)">
-                    <span>⚡ Синхронизировать сейчас</span>
-                </button>
-            </div>
-
-            @if (!string.IsNullOrEmpty(backupSetMessage))
-            {
-                <div class="status-badge @(backupSetIsError ? "badge-amber" : "badge-green")" style="margin-top: 0.75rem;">
-                    @backupSetMessage
-                </div>
-            }
-        </div>
-    </section>
-
-    <!-- Последние события синхронизации -->
-    <section class="card-section">
-        <h2>Последние события синхронизации (Журнал сессии)</h2>
-        <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 0.75rem; max-height: 250px; overflow-y: auto; font-family: monospace; font-size: 0.85rem;">
-            @if (SyncEngine.RecentEvents.Count == 0)
-            {
-                <span style="color: var(--text-secondary);">События в текущей сессии отсутствуют.</span>
-            }
-            else
-            {
-                @foreach (var log in SyncEngine.RecentEvents.AsEnumerable().Reverse().Take(50))
-                {
-                    <div style="margin-bottom: 0.35rem; color: @(log.Level == "ERROR" ? "#f87171" : (log.Level == "WARN" ? "#fbbf24" : "#e2e8f0"));">
-                        <span style="color: #94a3b8;">[@log.TimestampUtc.ToLocalTime().ToString("HH:mm:ss")]</span> @log.Message
-                    </div>
-                }
-            }
-        </div>
-    </section>
-
-    <!-- Ручная проверка резервного копирования одного файла -->
-    <section class="card-section">
-        <h2>Ручная проверка резервного копирования (Один файл)</h2>
-        <div class="diagnostic-section">
-            <div class="form-group">
-                <label class="form-label" for="manualFilePath">Полный путь к локальному файлу:</label>
-                <input id="manualFilePath" class="form-input" @bind="manualFilePath" placeholder="Например: D:\BackupDemo\test.txt" disabled="@isLoading" />
-            </div>
-
-            <div>
-                <button class="btn btn-primary" @onclick="BackupSingleFileAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))">
-                    <span>🚀 Резервировать файл</span>
-                </button>
-            </div>
-
-            @if (backupOperationResult != null)
-            {
-                <div class="result-box @(backupOperationResult.Success ? "success" : "error")">
-                    <div style="display: flex; align-items: center; justify-content: space-between;">
-                        <span style="font-weight: 600; font-size: 1.05rem;">
-                            @(backupOperationResult.Success ? "✅ Файл успешно сохранён" : "❌ Ошибка резервного копирования")
-                        </span>
-                        <span class="status-badge @(backupOperationResult.Success ? "badge-green" : "badge-red")">
-                            @(backupOperationResult.Success ? "УСПЕШНО" : backupOperationResult.ErrorCode ?? "ОШИБКА")
-                        </span>
-                    </div>
-
-                    <div class="kv-table">
-                        <span class="kv-key">Идентификатор файла (FileId):</span>
-                        <span class="kv-value">@(backupOperationResult.FileId?.ToString() ?? "—")</span>
-
-                        <span class="kv-key">Версия:</span>
-                        <span class="kv-value">@(backupOperationResult.VersionNumber?.ToString() ?? "—")</span>
-
-                        <span class="kv-key">Ключ хранилища:</span>
-                        <span class="kv-value">@(backupOperationResult.StorageKey ?? "—")</span>
-
-                        @if (!backupOperationResult.Success)
-                        {
-                            <span class="kv-key">Код ошибки:</span>
-                            <span class="kv-value" style="color: #f87171;">@backupOperationResult.ErrorCode</span>
-
-                            <span class="kv-key">Сообщение:</span>
-                            <span class="kv-value" style="color: #f87171;">@backupOperationResult.ErrorMessage</span>
-                        }
-                    </div>
-                </div>
-            }
-        </div>
-    </section>
-
-    <!-- Спецификация протокола -->
-    <section class="card-section protocol-overview">
-        <h2>Спецификация протокола TCP Protocol v1</h2>
-        <div class="protocol-grid">
-            <div class="protocol-item">
-                <span class="label">Сигнатура (Magic)</span>
-                <span class="val">BKP1</span>
-            </div>
-            <div class="protocol-item">
-                <span class="label">Версия протокола</span>
-                <span class="val">1</span>
-            </div>
-            <div class="protocol-item">
-                <span class="label">Структура фрейма</span>
-                <span class="val">[4Б HeaderLen BigEndian] [JSON Заголовок ≤ 64 KiB] [Тело/Поток]</span>
-            </div>
-            <div class="protocol-item">
-                <span class="label">Транспортный уровень</span>
-                <span class="val">Raw TCP сокеты (потоковая передача без полной буферизации файлов)</span>
-            </div>
-        </div>
-    </section>
+<div class="page-header">
+    <h1 class="page-title">Система резервного копирования</h1>
+    <p class="page-subtitle">Состояние клиента и синхронизации</p>
 </div>
+
+<!-- Состояние системы -->
+<section class="panel-section">
+    <div class="panel-header">
+        <h2 class="panel-title">Состояние системы</h2>
+        <div class="panel-actions">
+            <button class="btn btn-secondary btn-sm" @onclick="CheckGatewayConnectionAsync" disabled="@isLoading">
+                Проверить соединение
+            </button>
+            <button class="btn btn-secondary btn-sm" @onclick="RefreshStateAsync" disabled="@isLoading">
+                Обновить состояние
+            </button>
+        </div>
+    </div>
+
+    <div class="status-summary-grid">
+        <div class="status-summary-item">
+            <span class="status-label">Шлюз</span>
+            <span class="status-value">
+                <span class="status-dot @(isGatewayConnected ? "online" : "offline")"></span>
+                @(isGatewayConnected ? "Подключён" : "Недоступен")
+            </span>
+        </div>
+
+        <div class="status-summary-item">
+            <span class="status-label">Синхронизация</span>
+            <span class="status-value">
+                <span class="status-dot @(SyncEngine.IsRunning ? "online" : "pending")"></span>
+                @(SyncEngine.IsRunning ? "Работает" : "Остановлена")
+            </span>
+        </div>
+
+        <div class="status-summary-item">
+            <span class="status-label">Согласование</span>
+            <span class="status-value">
+                <span class="status-dot @(SyncEngine.IsReconciling ? "pending" : (!SyncEngine.ReconciliationRequired ? "online" : "warning"))"></span>
+                @(SyncEngine.IsReconciling ? "Выполняется..." : (!SyncEngine.ReconciliationRequired ? "Синхронизировано" : "Требуется"))
+            </span>
+        </div>
+
+        <div class="status-summary-item">
+            <span class="status-label">Последняя сверка</span>
+            <span class="status-value mono">
+                @(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? "Никогда")
+            </span>
+        </div>
+    </div>
+</section>
+
+<!-- Быстрый старт -->
+<section class="panel-section">
+    <h2 class="panel-title">Быстрый старт</h2>
+    <div class="checklist">
+        <div class="checklist-item @(isGatewayConnected ? "done" : "")">
+            <span class="checklist-num">1</span>
+            <span class="checklist-name">Соединение с сервером</span>
+            <span class="checklist-status">@(isGatewayConnected ? "✓ Подключено" : "Не подключено")</span>
+        </div>
+
+        <div class="checklist-item @(clientState?.ClientId != null && clientState.ClientId != Guid.Empty ? "done" : "")">
+            <span class="checklist-num">2</span>
+            <span class="checklist-name">Регистрация клиента</span>
+            <span class="checklist-status">@(clientState?.ClientId != null && clientState.ClientId != Guid.Empty ? "✓ Зарегистрирован" : "Не зарегистрирован")</span>
+        </div>
+
+        <div class="checklist-item @(!string.IsNullOrWhiteSpace(activeLocalRootPath) ? "done" : "")">
+            <span class="checklist-num">3</span>
+            <span class="checklist-name">Папка резервного копирования</span>
+            <span class="checklist-status mono">@(!string.IsNullOrWhiteSpace(activeLocalRootPath) ? activeLocalRootPath : "Не выбрана")</span>
+        </div>
+
+        <div class="checklist-item @(activeBackupSetId != Guid.Empty ? "done" : "")">
+            <span class="checklist-num">4</span>
+            <span class="checklist-name">Набор активирован</span>
+            <span class="checklist-status">@(activeBackupSetId != Guid.Empty ? $"✓ {backupSetName}" : "Не активирован")</span>
+        </div>
+
+        <div class="checklist-item @(SyncEngine.IsRunning ? "done" : "")">
+            <span class="checklist-num">5</span>
+            <span class="checklist-name">Синхронизация</span>
+            <span class="checklist-status">@(SyncEngine.IsRunning ? "✓ Работает" : "Остановлена")</span>
+        </div>
+    </div>
+</section>
+
+<!-- Локальный клиент -->
+<section class="panel-section">
+    <div class="panel-header">
+        <h2 class="panel-title">Локальный клиент</h2>
+        <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" @onclick="RegisterClientAsync" disabled="@isLoading">
+                Зарегистрировать клиент
+            </button>
+        </div>
+    </div>
+
+    <div class="kv-grid">
+        <div class="kv-row">
+            <span class="kv-key">Имя компьютера:</span>
+            <span class="kv-val">@(clientState?.MachineName ?? Environment.MachineName)</span>
+        </div>
+
+        <div class="kv-row">
+            <span class="kv-key">Идентификатор (ClientId):</span>
+            <span class="kv-val mono">
+                @if (clientState?.ClientId != null && clientState.ClientId != Guid.Empty)
+                {
+                    @clientState.ClientId
+                }
+                else
+                {
+                    <span class="text-warning">Ещё не зарегистрирован</span>
+                }
+            </span>
+        </div>
+
+        <div class="kv-row">
+            <span class="kv-key">Файл состояния:</span>
+            <span class="kv-val mono">data/client/client-state.json</span>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(clientStatusMessage))
+    {
+        <div class="alert @(clientStatusIsError ? "alert-warning" : "alert-success")">
+            @clientStatusMessage
+        </div>
+    }
+</section>
+
+<!-- Набор резервного копирования -->
+<section class="panel-section">
+    <h2 class="panel-title">Набор резервного копирования</h2>
+
+    <div class="form-grid">
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label" for="backupSetName">Название набора:</label>
+                <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="Например: DefaultSet" disabled="@isLoading" />
+                <span class="form-helper">Имя профиля резервного копирования в базе данных</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="localRootPath">Папка резервного копирования:</label>
+                <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="Например: D:\BackupDemo" disabled="@isLoading" />
+                <span class="form-helper">Локальный каталог для отслеживания и реконсиляции</span>
+            </div>
+        </div>
+
+        <div style="display: flex; gap: 0.65rem; align-items: center; flex-wrap: wrap;">
+            <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
+                Сохранить и активировать
+            </button>
+
+            <button class="btn btn-success" @onclick="StartAutomaticSyncAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || SyncEngine.IsRunning)">
+                Запустить синхронизацию
+            </button>
+
+            <button class="btn btn-danger-subtle" @onclick="StopAutomaticSyncAsync" disabled="@(isLoading || !SyncEngine.IsRunning)">
+                Остановить синхронизацию
+            </button>
+
+            <button class="btn btn-secondary" @onclick="ReconcileNowAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty)">
+                Синхронизировать сейчас
+            </button>
+        </div>
+
+        <div class="kv-grid" style="margin-top: 0.5rem;">
+            <div class="kv-row">
+                <span class="kv-key">Активный набор:</span>
+                <span class="kv-val mono">@(activeBackupSetId != Guid.Empty ? $"{backupSetName} ({activeBackupSetId})" : "—")</span>
+            </div>
+
+            <div class="kv-row">
+                <span class="kv-key">Активная папка:</span>
+                <span class="kv-val mono">@(SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? "—")</span>
+            </div>
+
+            <div class="kv-row">
+                <span class="kv-key">Файлов на сервере:</span>
+                <span class="kv-val">@(totalFilesCount.HasValue ? totalFilesCount.Value.ToString() : "—")</span>
+            </div>
+
+            <div class="kv-row">
+                <span class="kv-key">Ожидающих событий:</span>
+                <span class="kv-val">@SyncEngine.PendingEventCount</span>
+            </div>
+
+            <div class="kv-row">
+                <span class="kv-key">Последний результат:</span>
+                <span class="kv-val">@(FormatSyncResult(SyncEngine.LastSyncResult) ?? "—")</span>
+            </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(backupSetMessage))
+        {
+            <div class="alert @(backupSetIsError ? "alert-warning" : "alert-success")">
+                @backupSetMessage
+            </div>
+        }
+    </div>
+</section>
+
+<!-- Последние события синхронизации -->
+<section class="panel-section">
+    <h2 class="panel-title">Последние события синхронизации (Журнал сессии)</h2>
+    <div class="log-console">
+        @if (SyncEngine.RecentEvents.Count == 0)
+        {
+            <span class="text-secondary">События в текущей сессии отсутствуют.</span>
+        }
+        else
+        {
+            @foreach (var log in SyncEngine.RecentEvents.AsEnumerable().Reverse().Take(50))
+            {
+                <div class="log-entry" style="color: @(log.Level == "ERROR" ? "#f87171" : (log.Level == "WARN" ? "#fbbf24" : "#cbd5e1"));">
+                    <span class="text-secondary">[@log.TimestampUtc.ToLocalTime().ToString("HH:mm:ss")]</span> @log.Message
+                </div>
+            }
+        }
+    </div>
+</section>
+
+<!-- Ручная проверка резервного копирования (Один файл) -->
+<section class="panel-section">
+    <h2 class="panel-title">Ручная проверка резервного копирования (Один файл)</h2>
+    <div class="form-grid">
+        <div class="form-group">
+            <label class="form-label" for="manualFilePath">Полный путь к локальному файлу:</label>
+            <input id="manualFilePath" class="form-input" @bind="manualFilePath" placeholder="Например: D:\BackupDemo\test.txt" disabled="@isLoading" />
+        </div>
+
+        <div>
+            <button class="btn btn-primary" @onclick="BackupSingleFileAsync" disabled="@(isLoading || activeBackupSetId == Guid.Empty || string.IsNullOrWhiteSpace(manualFilePath))">
+                Резервировать файл
+            </button>
+        </div>
+
+        @if (backupOperationResult != null)
+        {
+            <div class="result-box @(backupOperationResult.Success ? "success" : "error")">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-weight: 600;">
+                        @(backupOperationResult.Success ? "Файл успешно сохранён" : "Ошибка резервного копирования")
+                    </span>
+                    <span class="status-badge @(backupOperationResult.Success ? "badge-green" : "badge-red")">
+                        @(backupOperationResult.Success ? "Успешно" : backupOperationResult.ErrorCode ?? "Ошибка")
+                    </span>
+                </div>
+
+                <div class="kv-grid">
+                    <div class="kv-row">
+                        <span class="kv-key">Идентификатор файла:</span>
+                        <span class="kv-val mono">@(backupOperationResult.FileId?.ToString() ?? "—")</span>
+                    </div>
+
+                    <div class="kv-row">
+                        <span class="kv-key">Версия:</span>
+                        <span class="kv-val mono">@(backupOperationResult.VersionNumber.HasValue ? $"v{backupOperationResult.VersionNumber.Value}" : "—")</span>
+                    </div>
+
+                    <div class="kv-row">
+                        <span class="kv-key">Ключ хранилища:</span>
+                        <span class="kv-val mono">@(backupOperationResult.StorageKey ?? "—")</span>
+                    </div>
+
+                    @if (!backupOperationResult.Success)
+                    {
+                        <div class="kv-row">
+                            <span class="kv-key">Код ошибки:</span>
+                            <span class="kv-val text-danger">@backupOperationResult.ErrorCode</span>
+                        </div>
+
+                        <div class="kv-row">
+                            <span class="kv-key">Сообщение:</span>
+                            <span class="kv-val text-danger">@backupOperationResult.ErrorMessage</span>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+</section>
+
+<!-- Спецификация сетевого протокола -->
+<section class="panel-section">
+    <h2 class="panel-title">Спецификация сетевого протокола TCP Protocol v1</h2>
+    <div class="protocol-grid">
+        <div class="protocol-item">
+            <span class="label">Сигнатура (Magic)</span>
+            <span class="val">BKP1</span>
+        </div>
+        <div class="protocol-item">
+            <span class="label">Версия протокола</span>
+            <span class="val">1</span>
+        </div>
+        <div class="protocol-item">
+            <span class="label">Структура фрейма</span>
+            <span class="val">[4Б HeaderLen BE] [JSON ≤ 64 KiB] [Тело]</span>
+        </div>
+        <div class="protocol-item">
+            <span class="label">Транспорт</span>
+            <span class="val">Raw TCP сокеты (буфер 64 KiB)</span>
+        </div>
+    </div>
+</section>
 
 @code {
     private ClientState? clientState;
@@ -356,8 +353,6 @@
             }
             else
             {
-                // Section 18: Never use source project directory as default backup root.
-                // Keep localRootPath empty when no profile exists.
                 localRootPath = "";
             }
 
@@ -432,7 +427,7 @@
             if (success)
             {
                 clientState = await BackupService.GetIdentityAsync();
-                clientStatusMessage = $"Клиент успешно зарегистрирован! Идентификатор: {clientState.ClientId}";
+                clientStatusMessage = $"Клиент успешно зарегистрирован. Идентификатор: {clientState.ClientId}";
                 clientStatusIsError = false;
             }
             else
@@ -491,7 +486,7 @@
                 };
                 await ProfileService.SaveProfileAsync(profile);
 
-                backupSetMessage = $"Набор резервного копирования '{response.Name}' успешно создан и активирован!";
+                backupSetMessage = $"Набор резервного копирования '{response.Name}' успешно сохранён и активирован.";
                 backupSetIsError = false;
             }
             else

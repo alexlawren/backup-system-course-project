@@ -8,134 +8,127 @@
 @inject NavigationManager Navigation
 @inject ILogger<Files> Logger
 
-<PageTitle>Система резервного копирования - Файлы и версии</PageTitle>
+<PageTitle>Файлы резервной копии</PageTitle>
 
-<div class="system-container">
-    <header class="system-header">
-        <div class="badge-tag">Каталог файлов</div>
-        <h1>Файлы резервной копии</h1>
-        <p class="subtitle">Каталог файлов активного набора (SyncGateway → MetadataService)</p>
-    </header>
-
-    @if (isLoadingProfile)
-    {
-        <div class="card-section">
-            <p>Загрузка профиля...</p>
-        </div>
-    }
-    else if (activeProfile == null)
-    {
-        <div class="card-section">
-            <div class="result-box error">
-                <strong>Нет активного профиля синхронизации</strong>
-                <p>Пожалуйста, сначала настройте и активируйте набор на <a href="/" style="color: var(--accent);">Главной странице</a>.</p>
-            </div>
-        </div>
-    }
-    else
-    {
-        <!-- Секция управления и фильтров -->
-        <section class="card-section">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
-                <div>
-                    <h2>Набор: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
-                    <p style="font-size: 0.85rem; color: var(--text-secondary); font-family: ui-monospace, monospace;">
-                        Папка: @activeProfile.LocalRootPath
-                    </p>
-                </div>
-                <div style="display: flex; align-items: center; gap: 1rem;">
-                    <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; cursor: pointer;">
-                        <input type="checkbox" @bind="includeDeleted" @bind:after="LoadFilesAsync" />
-                        <span>Включая удалённые файлы</span>
-                    </label>
-                    <button class="btn btn-secondary" @onclick="LoadFilesAsync" disabled="@isLoadingFiles">
-                        <span>🔄 Обновить</span>
-                    </button>
-                </div>
-            </div>
-        </section>
-
-        <!-- Таблица файлов -->
-        <section class="card-section">
-            @if (isLoadingFiles)
-            {
-                <p>Загрузка списка файлов из шлюза...</p>
-            }
-            else if (!string.IsNullOrEmpty(errorMessage))
-            {
-                <div class="result-box error">
-                    <strong>Ошибка загрузки файлов:</strong>
-                    <p>@errorMessage</p>
-                </div>
-            }
-            else if (files.Count == 0)
-            {
-                <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
-                    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">📂 Файлы в данном наборе отсутствуют.</p>
-                    <p style="font-size: 0.9rem;">Файлы появятся здесь после запуска синхронизации или сохранения первого файла.</p>
-                </div>
-            }
-            else
-            {
-                <div class="table-container">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Относительный путь</th>
-                                <th>Версия</th>
-                                <th>Размер</th>
-                                <th>Статус</th>
-                                <th>Изменён (UTC)</th>
-                                <th style="text-align: right;">Действия</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var file in files)
-                            {
-                                <tr>
-                                    <td class="mono" style="font-weight: 500;">
-                                        <a href="/files/@file.FileId" style="color: var(--accent); text-decoration: none;">
-                                            @file.RelativePath
-                                        </a>
-                                    </td>
-                                    <td>
-                                        <span class="status-badge badge-gray">v@file.CurrentVersionNumber</span>
-                                    </td>
-                                    <td class="mono">
-                                        @(file.CurrentSize.HasValue ? FormatSize(file.CurrentSize.Value) : "—")
-                                    </td>
-                                    <td>
-                                        @if (file.IsDeleted)
-                                        {
-                                            <span class="status-badge badge-red">Удалён</span>
-                                        }
-                                        else
-                                        {
-                                            <span class="status-badge badge-green">Активен</span>
-                                        }
-                                    </td>
-                                    <td style="font-size: 0.8rem; color: var(--text-secondary);">
-                                        @file.UpdatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss")
-                                    </td>
-                                    <td style="text-align: right;">
-                                        <a href="/files/@file.FileId" class="btn btn-secondary" style="text-decoration: none; padding: 0.35rem 0.75rem; font-size: 0.8rem;">
-                                            📜 Версии
-                                        </a>
-                                    </td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
-
-                <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary); display: flex; justify-content: space-between;">
-                    <span>Всего файлов: @files.Count</span>
-                    <span>Активных: @files.Count(f => !f.IsDeleted) | Удалённых: @files.Count(f => f.IsDeleted)</span>
-                </div>
-            }
-        </section>
-    }
+<div class="page-header">
+    <h1 class="page-title">Файлы резервной копии</h1>
+    <p class="page-subtitle">Каталог файлов активного набора синхронизации</p>
 </div>
+
+@if (isLoadingProfile)
+{
+    <section class="panel-section">
+        <p class="text-secondary">Загрузка профиля синхронизации...</p>
+    </section>
+}
+else if (activeProfile == null)
+{
+    <section class="panel-section">
+        <div class="alert alert-warning">
+            <strong>Нет активного профиля синхронизации.</strong>
+            Пожалуйста, сначала укажите папку и активируйте набор на <a href="/" style="color: var(--accent); text-decoration: underline;">Главной странице</a>.
+        </div>
+    </section>
+}
+else
+{
+    <!-- Секция управления и фильтров -->
+    <section class="panel-section">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Набор: <span class="mono" style="color: var(--accent);">@activeProfile.Name</span></h2>
+                <p class="mono text-secondary" style="font-size: 0.8rem; margin-top: 0.2rem;">
+                    Папка: @activeProfile.LocalRootPath
+                </p>
+            </div>
+            <div class="panel-actions">
+                <label style="display: flex; align-items: center; gap: 0.45rem; font-size: 0.85rem; cursor: pointer;">
+                    <input type="checkbox" @bind="includeDeleted" @bind:after="LoadFilesAsync" />
+                    <span>Показывать удалённые</span>
+                </label>
+                <button class="btn btn-secondary btn-sm" @onclick="LoadFilesAsync" disabled="@isLoadingFiles">
+                    Обновить
+                </button>
+            </div>
+        </div>
+
+        @if (isLoadingFiles)
+        {
+            <p class="text-secondary" style="padding: 1rem 0;">Загрузка списка файлов из шлюза...</p>
+        }
+        else if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger">
+                <strong>Ошибка:</strong> @errorMessage
+            </div>
+        }
+        else if (files.Count == 0)
+        {
+            <div style="text-align: center; padding: 2rem 1rem; color: var(--text-secondary);">
+                <p style="font-size: 1rem; margin-bottom: 0.25rem;">Файлы в данном наборе отсутствуют.</p>
+                <p style="font-size: 0.825rem;">Они появятся здесь после запуска синхронизации или сохранения первого файла.</p>
+            </div>
+        }
+        else
+        {
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Файл</th>
+                            <th>Версия</th>
+                            <th>Размер</th>
+                            <th>Статус</th>
+                            <th>Изменён (UTC)</th>
+                            <th style="text-align: right;">Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var file in files)
+                        {
+                            <tr>
+                                <td class="mono" style="font-weight: 500;">
+                                    <a href="/files/@file.FileId" style="color: var(--accent); text-decoration: none;">
+                                        @file.RelativePath
+                                    </a>
+                                </td>
+                                <td>
+                                    <span class="status-badge badge-gray">@($"v{file.CurrentVersionNumber}")</span>
+                                </td>
+                                <td class="mono">
+                                    @(file.CurrentSize.HasValue ? FormatSize(file.CurrentSize.Value) : "—")
+                                </td>
+                                <td>
+                                    @if (file.IsDeleted)
+                                    {
+                                        <span class="status-badge badge-red">Удалён</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="status-badge badge-green">Активен</span>
+                                    }
+                                </td>
+                                <td style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
+                                    @file.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm:ss")
+                                </td>
+                                <td style="text-align: right;">
+                                    <a href="/files/@file.FileId" class="btn btn-secondary btn-sm" style="text-decoration: none;">
+                                        Версии
+                                    </a>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="font-size: 0.8rem; color: var(--text-secondary); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.25rem;">
+                <span>Всего файлов: @files.Count</span>
+                <span>Активных: @files.Count(f => !f.IsDeleted) | Удалённых: @files.Count(f => f.IsDeleted)</span>
+            </div>
+        }
+    </section>
+}
 
 @code {
     private SyncProfile? activeProfile;
@@ -153,8 +146,8 @@
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Ошибка загрузки профиля синхронизации");
-            errorMessage = "Ошибка обмена с сервером. Подробности записаны в журнал.";
+            Logger.LogError(ex, "Ошибка получения профиля синхронизации");
+            errorMessage = "Ошибка обмена с сервером при получении профиля.";
         }
         finally
         {
@@ -183,13 +176,13 @@
             }
             else
             {
-                errorMessage = response.ErrorMessage ?? "Не удалось получить список файлов с сервера.";
+                errorMessage = response.ErrorMessage ?? "Не удалось загрузить список файлов.";
             }
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Ошибка получения списка файлов");
-            errorMessage = "Ошибка обмена с сервером при получении списка файлов. Подробности записаны в журнал.";
+            Logger.LogError(ex, "Ошибка загрузки списка файлов");
+            errorMessage = "Ошибка обмена с сервером при загрузке файлов. Подробности записаны в журнал.";
         }
         finally
         {
@@ -199,9 +192,14 @@
 
     private static string FormatSize(long bytes)
     {
-        if (bytes < 1024) return $"{bytes} Б";
-        if (bytes < 1024 * 1024) return $"{(bytes / 1024.0):F1} КБ";
-        if (bytes < 1024 * 1024 * 1024) return $"{(bytes / (1024.0 * 1024.0)):F2} МБ";
-        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)):F2} ГБ";
+        string[] units = { "Б", "КБ", "МБ", "ГБ" };
+        double size = bytes;
+        int unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+        return $"{size:0.##} {units[unitIndex]}";
     }
 }

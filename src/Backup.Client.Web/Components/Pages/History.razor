@@ -1,140 +1,138 @@
 @page "/history"
 @rendermode InteractiveServer
+@using System.Text.RegularExpressions
 @using Backup.Client.Web.Services
 @using Backup.Shared.Messages
 @inject IBackupClientService BackupService
 @inject ISyncProfileService ProfileService
 @inject ILogger<History> Logger
 
-<PageTitle>Система резервного копирования - Журнал изменений</PageTitle>
+<PageTitle>Журнал изменений</PageTitle>
 
-<div class="system-container">
-    <header class="system-header">
-        <div class="badge-tag">Аудит — Журнал изменений PostgreSQL</div>
-        <h1>Журнал изменений</h1>
-        <p class="subtitle">Полный журнал аудита изменений: Создание, Изменение, Переименование, Удаление и Восстановление</p>
-    </header>
-
-    @if (isLoadingProfile)
-    {
-        <div class="card-section">
-            <p>Загрузка профиля...</p>
-        </div>
-    }
-    else if (activeProfile == null)
-    {
-        <div class="card-section">
-            <div class="result-box error">
-                <strong>Нет активного профиля синхронизации</strong>
-                <p>Пожалуйста, сначала настройте набор на <a href="/" style="color: var(--accent);">Главной странице</a>.</p>
-            </div>
-        </div>
-    }
-    else
-    {
-        <section class="card-section">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
-                <div>
-                    <h2>Журнал изменений: <span style="color: var(--accent);">@activeProfile.Name</span></h2>
-                    <p style="font-size: 0.85rem; color: var(--text-secondary);">
-                        Запрос через SyncGateway → MetadataService (неизменяемые аудит-записи)
-                    </p>
-                </div>
-                <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
-                    <div style="display: flex; gap: 0.5rem; align-items: center;">
-                        <label for="actionFilter" style="font-size: 0.85rem; color: var(--text-secondary);">Фильтр действий:</label>
-                        <select id="actionFilter" class="form-input" style="width: auto; padding: 0.35rem 0.75rem;" @bind="selectedAction">
-                            <option value="">Все действия</option>
-                            <option value="CREATE">Создание</option>
-                            <option value="MODIFY">Изменение</option>
-                            <option value="RENAME">Переименование</option>
-                            <option value="DELETE">Удаление</option>
-                            <option value="RESTORE">Восстановление</option>
-                        </select>
-                    </div>
-                    <button class="btn btn-secondary" @onclick="LoadLogAsync" disabled="@isLoadingLog">
-                        <span>🔄 Обновить журнал</span>
-                    </button>
-                </div>
-            </div>
-        </section>
-
-        <section class="card-section">
-            @if (isLoadingLog)
-            {
-                <p>Загрузка записей журнала...</p>
-            }
-            else if (!string.IsNullOrEmpty(errorMessage))
-            {
-                <div class="result-box error">
-                    <strong>Ошибка:</strong>
-                    <p>@errorMessage</p>
-                </div>
-            }
-            else if (entries.Count == 0)
-            {
-                <p style="color: var(--text-secondary); text-align: center; padding: 2rem;">Записи в журнале изменений отсутствуют.</p>
-            }
-            else
-            {
-                <div class="table-container">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Время (UTC)</th>
-                                <th>Действие</th>
-                                <th>Файл / Путь</th>
-                                <th>Статус</th>
-                                <th>Подробности</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var entry in filteredEntries)
-                            {
-                                <tr>
-                                    <td style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
-                                        @entry.CreatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss")
-                                    </td>
-                                    <td>
-                                        <span class="status-badge @GetActionBadgeClass(entry.Action)">
-                                            @FormatActionDisplay(entry.Action)
-                                        </span>
-                                    </td>
-                                    <td class="mono">
-                                        @if (entry.FileId.HasValue && !string.IsNullOrEmpty(entry.RelativePath))
-                                        {
-                                            <a href="/files/@entry.FileId.Value" style="color: var(--accent); text-decoration: none;">
-                                                @entry.RelativePath
-                                            </a>
-                                        }
-                                        else if (!string.IsNullOrEmpty(entry.RelativePath))
-                                        {
-                                            <span>@entry.RelativePath</span>
-                                        }
-                                        else
-                                        {
-                                            <span style="color: var(--text-secondary);">—</span>
-                                        }
-                                    </td>
-                                    <td>
-                                        <span class="status-badge badge-gray">@FormatStatusDisplay(entry.Status)</span>
-                                    </td>
-                                    <td style="font-size: 0.85rem; color: var(--text-secondary);">
-                                        @(entry.Details ?? "—")
-                                    </td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
-
-                <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-secondary);">
-                    <span>Отображается @filteredEntries.Count() из @entries.Count записей журнала</span>
-                </div>
-            }
-        </section>
-    }
+<div class="page-header">
+    <h1 class="page-title">Журнал изменений</h1>
+    <p class="page-subtitle">История операций с файлами активного набора</p>
 </div>
+
+@if (isLoadingProfile)
+{
+    <section class="panel-section">
+        <p class="text-secondary">Загрузка профиля синхронизации...</p>
+    </section>
+}
+else if (activeProfile == null)
+{
+    <section class="panel-section">
+        <div class="alert alert-warning">
+            <strong>Нет активного профиля синхронизации.</strong>
+            Пожалуйста, сначала настройте набор на <a href="/" style="color: var(--accent); text-decoration: underline;">Главной странице</a>.
+        </div>
+    </section>
+}
+else
+{
+    <section class="panel-section">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Набор: <span class="mono" style="color: var(--accent);">@activeProfile.Name</span></h2>
+                <p class="text-secondary" style="font-size: 0.8rem; margin-top: 0.2rem;">
+                    Аудит-записи операций в базе данных
+                </p>
+            </div>
+            <div class="panel-actions">
+                <div style="display: flex; gap: 0.4rem; align-items: center;">
+                    <label for="actionFilter" class="text-secondary" style="font-size: 0.8rem;">Действие:</label>
+                    <select id="actionFilter" class="form-input" style="width: auto; padding: 0.3rem 0.6rem; font-size: 0.8rem;" @bind="selectedAction">
+                        <option value="">Все действия</option>
+                        <option value="CREATE">Создание</option>
+                        <option value="MODIFY">Изменение</option>
+                        <option value="RENAME">Переименование</option>
+                        <option value="DELETE">Удаление</option>
+                        <option value="RESTORE">Восстановление</option>
+                    </select>
+                </div>
+                <button class="btn btn-secondary btn-sm" @onclick="LoadLogAsync" disabled="@isLoadingLog">
+                    Обновить
+                </button>
+            </div>
+        </div>
+
+        @if (isLoadingLog)
+        {
+            <p class="text-secondary" style="padding: 1rem 0;">Загрузка записей журнала...</p>
+        }
+        else if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger">
+                <strong>Ошибка:</strong> @errorMessage
+            </div>
+        }
+        else if (entries.Count == 0)
+        {
+            <div style="text-align: center; padding: 2rem 1rem; color: var(--text-secondary);">
+                <p style="font-size: 1rem; margin-bottom: 0.25rem;">Записи в журнале изменений отсутствуют.</p>
+                <p style="font-size: 0.825rem;">Операции появятся здесь после сохранения, изменения или удаления файлов.</p>
+            </div>
+        }
+        else
+        {
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Дата и время (UTC)</th>
+                            <th>Действие</th>
+                            <th>Файл</th>
+                            <th>Статус</th>
+                            <th>Подробности</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var entry in filteredEntries)
+                        {
+                            <tr>
+                                <td class="mono" style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
+                                    @entry.CreatedAtUtc.ToString("dd.MM.yyyy HH:mm:ss")
+                                </td>
+                                <td>
+                                    <span class="status-badge @GetActionBadgeClass(entry.Action)">
+                                        @FormatActionDisplay(entry.Action)
+                                    </span>
+                                </td>
+                                <td class="mono">
+                                    @if (entry.FileId.HasValue && !string.IsNullOrEmpty(entry.RelativePath))
+                                    {
+                                        <a href="/files/@entry.FileId.Value" style="color: var(--accent); text-decoration: none;">
+                                            @entry.RelativePath
+                                        </a>
+                                    }
+                                    else if (!string.IsNullOrEmpty(entry.RelativePath))
+                                    {
+                                        <span>@entry.RelativePath</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-secondary">—</span>
+                                    }
+                                </td>
+                                <td>
+                                    <span class="status-badge badge-gray">@FormatStatusDisplay(entry.Status)</span>
+                                </td>
+                                <td style="font-size: 0.825rem; word-break: break-word;">
+                                    @FormatDetailsDisplay(entry.Details)
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                <span>Отображается @filteredEntries.Count() из @entries.Count записей журнала</span>
+            </div>
+        }
+    </section>
+}
 
 @code {
     private SyncProfile? activeProfile;
@@ -158,7 +156,7 @@
         catch (Exception ex)
         {
             Logger.LogError(ex, "Ошибка получения профиля синхронизации");
-            errorMessage = "Ошибка обмена с сервером. Подробности записаны в журнал.";
+            errorMessage = "Ошибка обмена с сервером при получении профиля.";
         }
         finally
         {
@@ -214,6 +212,7 @@
     private static string FormatStatusDisplay(string status) => status.ToUpperInvariant() switch
     {
         "SUCCESS" => "Успешно",
+        "COMMITTED" => "Зафиксировано",
         "FAILED" => "Ошибка",
         "PENDING" => "В обработке",
         _ => status
@@ -228,4 +227,54 @@
         "RESTORE" => "badge-green",
         _ => "badge-gray"
     };
+
+    private static string FormatDetailsDisplay(string? details)
+    {
+        if (string.IsNullOrWhiteSpace(details))
+            return "—";
+
+        // Version N committed with Sha256 <hash>
+        var vMatch = Regex.Match(details, @"Version\s+(\d+)\s+committed\s+with\s+Sha256\s+([a-fA-F0-9]+)", RegexOptions.IgnoreCase);
+        if (vMatch.Success)
+        {
+            string ver = vMatch.Groups[1].Value;
+            string hash = vMatch.Groups[2].Value;
+            return $"Версия {ver} сохранена. SHA-256: {FormatTruncatedHash(hash)}";
+        }
+
+        // Restored version N with Sha256 <hash>
+        var rMatch = Regex.Match(details, @"Restored\s+version\s+(\d+)\s+with\s+Sha256\s+([a-fA-F0-9]+)", RegexOptions.IgnoreCase);
+        if (rMatch.Success)
+        {
+            string ver = rMatch.Groups[1].Value;
+            string hash = rMatch.Groups[2].Value;
+            return $"Восстановлена версия {ver}. SHA-256: {FormatTruncatedHash(hash)}";
+        }
+
+        // File '<path>' marked as deleted
+        var dMatch = Regex.Match(details, @"File\s+'([^']+)'\s+marked\s+as\s+deleted", RegexOptions.IgnoreCase);
+        if (dMatch.Success)
+        {
+            return "Файл отмечен как удалённый";
+        }
+
+        // Renamed from '<old>' to '<new>'
+        var renMatch = Regex.Match(details, @"Renamed\s+from\s+'([^']+)'\s+to\s+'([^']+)'", RegexOptions.IgnoreCase);
+        if (renMatch.Success)
+        {
+            string oldPath = renMatch.Groups[1].Value;
+            string newPath = renMatch.Groups[2].Value;
+            return $"Переименован: {oldPath} → {newPath}";
+        }
+
+        // Fallback: shorten any 64-char hex hash
+        return Regex.Replace(details, @"\b([a-fA-F0-9]{8})[a-fA-F0-9]{48}([a-fA-F0-9]{8})\b", "$1...$2");
+    }
+
+    private static string FormatTruncatedHash(string? hash)
+    {
+        if (string.IsNullOrEmpty(hash) || hash.Length <= 16)
+            return hash ?? "—";
+        return $"{hash[..8]}...{hash[^8..]}";
+    }
 }

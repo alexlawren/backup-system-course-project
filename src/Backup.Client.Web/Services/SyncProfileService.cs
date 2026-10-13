@@ -25,9 +25,34 @@ public class SyncProfileService : ISyncProfileService
 
     public SyncProfileService(string? baseDirectory = null)
     {
-        string baseDir = baseDirectory ?? Path.Combine(AppContext.BaseDirectory, "data", "client");
+        string baseDir = baseDirectory ?? ResolveDefaultDataClientDir();
         Directory.CreateDirectory(baseDir);
         _profileFilePath = Path.Combine(baseDir, "sync-profile.json");
+    }
+
+    private static string ResolveDefaultDataClientDir()
+    {
+        string? current = Directory.GetCurrentDirectory();
+        while (!string.IsNullOrEmpty(current))
+        {
+            if (File.Exists(Path.Combine(current, "BackupSystem.sln")))
+            {
+                return Path.GetFullPath(Path.Combine(current, "data", "client"));
+            }
+            current = Directory.GetParent(current)?.FullName;
+        }
+
+        string? baseDir = AppContext.BaseDirectory;
+        while (!string.IsNullOrEmpty(baseDir))
+        {
+            if (File.Exists(Path.Combine(baseDir, "BackupSystem.sln")))
+            {
+                return Path.GetFullPath(Path.Combine(baseDir, "data", "client"));
+            }
+            baseDir = Directory.GetParent(baseDir)?.FullName;
+        }
+
+        return Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "data", "client"));
     }
 
     public async Task<SyncProfile?> GetProfileAsync(CancellationToken cancellationToken = default)

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.RegularExpressions;
+using Backup.Client.Web.Services;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -120,5 +121,81 @@ public class BlazorStaticAssetsRegressionTests : IClassFixture<WebApplicationFac
             Assert.True(body.Length > 0);
             Assert.DoesNotContain("<!DOCTYPE html>", body, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/files")]
+    [InlineData("/history")]
+    public async Task Pages_RenderWithoutLiteralRazorExpressions(string path)
+    {
+        using var client = _factory.CreateClient();
+
+        var response = await client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        string html = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("v@", html);
+        Assert.DoesNotContain("@file", html);
+        Assert.DoesNotContain("@ver", html);
+        Assert.DoesNotContain("@lastRestore", html);
+    }
+
+    [Fact]
+    public async Task Live_PopulateSmokeFilesAndVerifyUiDetailsPage()
+    {
+        string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
+        string clientStatePath = Path.Combine(repoRoot, "data", "client", "client-state.json");
+        string localRoot = Path.Combine(repoRoot, "data", "smoke_ui_test");
+        string testFilePath = Path.Combine(localRoot, "notes.txt");
+        string smokeFileIdPath = Path.Combine(repoRoot, "data", "client", "smoke-file-id.txt");
+
+        using var handler = new HttpClientHandler();
+        using var liveClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
+        try
+        {
+            var ping = await liveClient.GetAsync("http://127.0.0.1:5100/");
+            if (!ping.IsSuccessStatusCode) return;
+        }
+        catch { return; }
+
+        Directory.CreateDirectory(localRoot);
+        var identityService = new ClientIdentityService(clientStatePath);
+        var gatewayClient = new BackupGatewayClient("127.0.0.1", 5000);
+        var clientService = new BackupClientService(gatewayClient, identityService);
+
+        await clientService.EnsureRegisteredAsync();
+        var bs = await clientService.CreateBackupSetAsync("DemoProjectSet", localRoot);
+        if (!bs.Success) return;
+
+        var profileService = new SyncProfileService(Path.Combine(repoRoot, "data", "client"));
+        await profileService.SaveProfileAsync(new SyncProfile
+        {
+            BackupSetId = bs.BackupSetId,
+            Name = "DemoProjectSet",
+            LocalRootPath = localRoot,
+            AutomaticSyncEnabled = false
+        });
+
+        // Backup v1
+        await File.WriteAllTextAsync(testFilePath, "Content Version 1");
+        var up1 = await clientService.BackupSingleFileAsync(bs.BackupSetId, localRoot, testFilePath);
+        Assert.True(up1.Success);
+
+        // Backup v2
+        await File.WriteAllTextAsync(testFilePath, "Content Version 2 (Modified)");
+        var up2 = await clientService.BackupSingleFileAsync(bs.BackupSetId, localRoot, testFilePath);
+        Assert.True(up2.Success);
+
+        var fileId = up1.FileId!.Value;
+        await File.WriteAllTextAsync(smokeFileIdPath, fileId.ToString());
+
+        // Test GET /files/{fileId}
+        var fileDetailsResp = await liveClient.GetAsync($"http://127.0.0.1:5100/files/{fileId}");
+        Assert.Equal(HttpStatusCode.OK, fileDetailsResp.StatusCode);
+        string detailsHtml = await fileDetailsResp.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("v@", detailsHtml);
+        Assert.Contains("v2", detailsHtml);
+        Assert.Contains("v1", detailsHtml);
     }
 }

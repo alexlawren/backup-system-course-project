@@ -1,16 +1,21 @@
 @inherits LayoutComponentBase
 
-<div style="width: 100%; max-width: 920px; display: flex; flex-direction: column; gap: 1.5rem; margin: 0 auto;">
+<div class="app-layout">
     <nav class="system-nav">
-        <a href="" class="nav-brand">🛡️ Система резервного копирования v1.1</a>
-        <div class="nav-links">
-            <NavLink href="" Match="NavLinkMatch.All" class="nav-link">Главная</NavLink>
-            <NavLink href="files" class="nav-link">Файлы и версии</NavLink>
-            <NavLink href="history" class="nav-link">Журнал изменений</NavLink>
+        <div class="nav-left">
+            <a href="" class="nav-brand">Система резервного копирования</a>
+            <div class="nav-links">
+                <NavLink href="" Match="NavLinkMatch.All" class="nav-link">Главная</NavLink>
+                <NavLink href="files" class="nav-link">Файлы</NavLink>
+                <NavLink href="history" class="nav-link">Журнал</NavLink>
+            </div>
+        </div>
+        <div class="nav-right">
+            <span class="nav-status-badge">Шлюз: 127.0.0.1:5000</span>
         </div>
     </nav>
 
-    <main>
+    <main class="app-main">
         @Body
     </main>
 </div>
