@@ -26,7 +26,7 @@
 .\stop.ps1
 ```
 
-Запуск полного набора автоматических тестов (181 тест):
+Запуск полного набора автоматических тестов (184 теста):
 ```powershell
 .\test.ps1
 ```
@@ -36,7 +36,15 @@
 
 ---
 
-**RELEASE FIX #1:** TCP SESSION/FRAMING STABILIZATION + FULL RUSSIAN UI + ONE-COMMAND STARTUP + 181 TESTS GREEN
+**RELEASE FIX #2:** BLAZOR STATIC ASSETS / CSS SCOPED DELIVERY + VISUAL BROWSER VERIFICATION + 184 TESTS GREEN
+- Устранен runtime bug отдачи статических стилей Blazor (.NET 9) `Backup.Client.Web.*.styles.css` (HTTP 500 FileNotFoundException): включена явная загрузка `StaticWebAssetsLoader.UseStaticWebAssets` в конвейере хоста и передача `--environment Development` в скрипте запуска `start.ps1`;
+- Подтверждено отображение темной темы, карточек, цветных статусов, адаптивной навигации и русской локализации в браузере;
+- Добавлен автоматический регрессионный сьют `BlazorStaticAssetsRegressionTests` (184 теста в зеленой зоне);
+- Полное сохранение стабильности TCP Protocol v1 и one-command startup (`.\start.ps1`).
+
+---
+
+**RELEASE FIX #1:** TCP SESSION/FRAMING STABILIZATION + FULL RUSSIAN UI + ONE-COMMAND STARTUP
 - Устранен runtime bug рассинхронизации TCP framing (`HeaderLength 2065855593 bytes`): вычитка тела `Pong`, атомарная очистка сокетов при разрыве, строгая сериализация сессии через `SemaphoreSlim(1,1)`;
 - Полная русификация всех страниц Web UI (`/`, `/files`, `/files/{id}`, `/history`, интерактивные диалоги, панель «Быстрый старт»);
 - Автоматизированный запуск и остановка всей системы (`start.ps1`, `stop.ps1`, `test.ps1`);

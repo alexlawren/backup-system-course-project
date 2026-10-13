@@ -3,6 +3,7 @@ using Backup.Client.Web.Configuration;
 using Backup.Client.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseStaticWebAssets();
 
 // Configure Gateway options
 builder.Services.Configure<GatewayOptions>(
@@ -41,3 +42,5 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 app.Run();
+
+public partial class Program { }

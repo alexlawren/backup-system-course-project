@@ -183,7 +183,7 @@ $runningManifest["SyncGateway"] = @{ Pid = $gatewayProc.Id; Port = 5000; Process
 
 Write-Host "Запуск Client.Web..." -ForegroundColor Yellow
 $clientWorkDir = Join-Path $RepoRoot "src\Backup.Client.Web"
-$clientProc = Start-ServiceProcess "Client.Web" $clientDll "client" $clientWorkDir
+$clientProc = Start-ServiceProcess "Client.Web" $clientDll "client" $clientWorkDir "--environment Development"
 if (-not (Wait-PortReady "127.0.0.1" 5100 $clientProc "client" 25)) { try { $metaProc.Kill() } catch { }; try { $storageProc.Kill() } catch { }; try { $gatewayProc.Kill() } catch { }; try { $clientProc.Kill() } catch { }; exit 1 }
 Write-Host "[OK] Client.Web :5100 готов" -ForegroundColor Green
 $runningManifest["Client.Web"] = @{ Pid = $clientProc.Id; Port = 5100; ProcessName = "dotnet" }
