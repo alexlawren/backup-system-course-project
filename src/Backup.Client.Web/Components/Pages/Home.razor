@@ -374,6 +374,7 @@
         {
             activeBackupSetId = profile.BackupSetId;
             activeLocalRootPath = profile.LocalRootPath;
+            backupSetName = profile.Name;
         }
         await LoadTotalFilesCountAsync();
         StateHasChanged();
@@ -453,11 +454,12 @@
         if (string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))
             return;
 
-        if (!Directory.Exists(localRootPath))
+        string normalizedRootPath = Path.GetFullPath(localRootPath.Trim());
+        if (!Directory.Exists(normalizedRootPath))
         {
             try
             {
-                Directory.CreateDirectory(localRootPath);
+                Directory.CreateDirectory(normalizedRootPath);
             }
             catch (Exception ex)
             {
@@ -471,21 +473,25 @@
         backupSetMessage = "";
         try
         {
-            var response = await BackupService.CreateBackupSetAsync(backupSetName, localRootPath);
+            var response = await BackupService.CreateBackupSetAsync(backupSetName, normalizedRootPath);
             if (response.Success && response.BackupSetId != Guid.Empty)
             {
                 activeBackupSetId = response.BackupSetId;
-                activeLocalRootPath = localRootPath;
+                backupSetName = response.Name;
+                localRootPath = normalizedRootPath;
+                activeLocalRootPath = normalizedRootPath;
 
                 var profile = new SyncProfile
                 {
                     BackupSetId = response.BackupSetId,
                     Name = backupSetName,
-                    LocalRootPath = localRootPath,
+                    LocalRootPath = normalizedRootPath,
                     AutomaticSyncEnabled = SyncEngine.IsRunning
                 };
                 await ProfileService.SaveProfileAsync(profile);
+                await SyncEngine.SwitchProfileAsync(profile);
 
+                await LoadTotalFilesCountAsync();
                 backupSetMessage = $"Набор резервного копирования '{response.Name}' успешно сохранён и активирован.";
                 backupSetIsError = false;
             }
@@ -504,6 +510,7 @@
         finally
         {
             isLoading = false;
+            StateHasChanged();
         }
     }
 
@@ -611,7 +618,7 @@
         backupOperationResult = null;
         try
         {
-            string root = activeLocalRootPath ?? localRootPath;
+            string root = SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? localRootPath;
             backupOperationResult = await BackupService.BackupSingleFileAsync(activeBackupSetId, root, manualFilePath);
         }
         catch (Exception ex)

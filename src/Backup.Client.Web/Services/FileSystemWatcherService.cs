@@ -23,11 +23,14 @@ public interface IFileSystemWatcherService : IDisposable
 {
     bool IsRunning { get; }
     string? WatchedPath { get; }
+    string? CurrentWatchedDirectory => WatchedPath;
     ChannelReader<InternalFileChangeEvent> Reader { get; }
     event Action? OverflowOrErrorOccurred;
 
     void Start(string rootPath);
     void Stop();
+    void StopWatching(string? expectedPath = null) => Stop();
+    void StartWatching(string rootPath) => Start(rootPath);
 }
 
 public class FileSystemWatcherService : IFileSystemWatcherService
@@ -39,6 +42,7 @@ public class FileSystemWatcherService : IFileSystemWatcherService
 
     public bool IsRunning { get; private set; }
     public string? WatchedPath { get; private set; }
+    public string? CurrentWatchedDirectory => IsRunning ? WatchedPath : null;
     public ChannelReader<InternalFileChangeEvent> Reader => _channel.Reader;
     public event Action? OverflowOrErrorOccurred;
 
@@ -52,6 +56,19 @@ public class FileSystemWatcherService : IFileSystemWatcherService
         });
     }
 
+    public void StartWatching(string rootPath) => Start(rootPath);
+
+    public void StopWatching(string? expectedPath = null)
+    {
+        lock (_lock)
+        {
+            if (expectedPath == null || string.Equals(WatchedPath, Path.GetFullPath(expectedPath), StringComparison.OrdinalIgnoreCase))
+            {
+                Stop();
+            }
+        }
+    }
+
     public void Start(string rootPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
@@ -62,7 +79,7 @@ public class FileSystemWatcherService : IFileSystemWatcherService
 
             if (!Directory.Exists(rootPath))
             {
-                throw new DirectoryNotFoundException($"Directory '{rootPath}' does not exist.");
+                Directory.CreateDirectory(rootPath);
             }
 
             WatchedPath = Path.GetFullPath(rootPath);
@@ -110,9 +127,11 @@ public class FileSystemWatcherService : IFileSystemWatcherService
                 _watcher = null;
             }
 
+            string? oldWatched = WatchedPath;
+            WatchedPath = null;
             IsRunning = false;
             _channel.Writer.TryComplete();
-            _logger?.LogInformation("[FileWatcher] Stopped watching directory '{Path}'", WatchedPath);
+            _logger?.LogInformation("[FileWatcher] Stopped watching directory '{Path}'", oldWatched);
         }
     }
 

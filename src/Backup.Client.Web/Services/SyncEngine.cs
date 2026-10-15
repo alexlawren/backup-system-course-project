@@ -17,6 +17,7 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
 {
     bool IsRunning { get; }
     bool IsReconciling { get; }
+    SyncProfile? ActiveProfile { get; }
     string? CurrentLocalRootPath { get; }
     Guid? CurrentBackupSetId { get; }
     string? CurrentBackupSetName { get; }
@@ -28,6 +29,7 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
 
     Task StartAsync(SyncProfile profile, CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
+    Task SwitchProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default);
     Task ReconcileNowAsync(CancellationToken cancellationToken = default);
     Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default);
 }
@@ -51,6 +53,7 @@ public class SyncEngine : ISyncEngine
     private readonly IFileSystemWatcherService _watcherService;
     private readonly IFileStabilityHelper _stabilityHelper;
     private readonly IRestoreSuppressionService _suppressionService;
+    private readonly ISyncProfileService? _profileService;
     private readonly AsyncPathLock _pathLocks = new();
     private readonly ILogger<SyncEngine> _logger;
 
@@ -67,6 +70,7 @@ public class SyncEngine : ISyncEngine
 
     public bool IsRunning { get; private set; }
     public bool IsReconciling { get; private set; }
+    public SyncProfile? ActiveProfile => _activeProfile;
     public string? CurrentLocalRootPath => _activeProfile?.LocalRootPath;
     public Guid? CurrentBackupSetId => _activeProfile?.BackupSetId;
     public string? CurrentBackupSetName => _activeProfile?.Name;
@@ -104,7 +108,8 @@ public class SyncEngine : ISyncEngine
         IFileStabilityHelper stabilityHelper,
         ILogger<SyncEngine> logger,
         int debounceDelayMs = 750,
-        IRestoreSuppressionService? suppressionService = null)
+        IRestoreSuppressionService? suppressionService = null,
+        ISyncProfileService? profileService = null)
     {
         _gatewayClient = gatewayClient;
         _identityService = identityService;
@@ -115,6 +120,7 @@ public class SyncEngine : ISyncEngine
         _logger = logger;
         _debounceDelayMs = debounceDelayMs;
         _suppressionService = suppressionService ?? new RestoreSuppressionService();
+        _profileService = profileService;
         _watcherService.OverflowOrErrorOccurred += OnWatcherOverflowOrError;
         _gatewayClient.Reconnected += OnGatewayReconnected;
     }
@@ -165,22 +171,52 @@ public class SyncEngine : ISyncEngine
     public async Task StartAsync(SyncProfile profile, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
+        profile.AutomaticSyncEnabled = true;
+        await SwitchProfileAsync(profile, cancellationToken);
+    }
+
+    public async Task SwitchProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
 
         if (profile.BackupSetId == Guid.Empty)
         {
             throw new ArgumentException("BackupSetId cannot be empty.", nameof(profile));
         }
 
-        if (string.IsNullOrWhiteSpace(profile.LocalRootPath) || !Directory.Exists(profile.LocalRootPath))
+        if (string.IsNullOrWhiteSpace(profile.LocalRootPath))
         {
-            throw new DirectoryNotFoundException($"LocalRootPath '{profile.LocalRootPath}' does not exist on disk.");
+            throw new ArgumentException("LocalRootPath cannot be empty.", nameof(profile));
         }
 
+        string normalizedPath = Path.GetFullPath(profile.LocalRootPath.Trim());
+        profile.LocalRootPath = normalizedPath;
+        if (!Directory.Exists(normalizedPath))
+        {
+            Directory.CreateDirectory(normalizedPath);
+        }
+
+        bool shouldRun = profile.AutomaticSyncEnabled || IsRunning;
+
+        // 1. Explicitly stop watcher on old root before anything else
+        string? oldRoot = _activeProfile?.LocalRootPath;
+        if (!string.IsNullOrEmpty(oldRoot))
+        {
+            _watcherService.StopWatching(oldRoot);
+        }
         await StopAsync(cancellationToken);
 
         await _syncLock.WaitAsync(cancellationToken);
         try
         {
+            // 2. Persist new sync profile atomically
+            profile.AutomaticSyncEnabled = shouldRun;
+            if (_profileService != null)
+            {
+                await _profileService.SaveProfileAsync(profile, cancellationToken);
+            }
+
+            // 3. Update in-memory ActiveProfile
             _activeProfile = profile;
 
             // Ensure client identity is registered
@@ -204,24 +240,38 @@ public class SyncEngine : ISyncEngine
             var activeIdentity = await _identityService.GetStateAsync(cancellationToken);
             _gatewayClient.SetActiveClientId(activeIdentity.ClientId);
 
-            Log($"[SyncEngine] Starting automatic synchronization for '{profile.Name}' ({profile.LocalRootPath})");
+            // 4. Reset/reload LocalFileIndex for new BackupSet
+            await _indexService.LoadIndexAsync(profile.BackupSetId, cancellationToken);
 
-            // 1. Start FileSystemWatcher so that events during initial reconciliation are not lost
-            _watcherService.Start(profile.LocalRootPath);
+            // 5. Mark reconciliation required
+            ReconciliationRequired = true;
 
-            // 2. Perform initial reconciliation
-            await ExecuteReconciliationInternalAsync(cancellationToken);
+            if (shouldRun)
+            {
+                Log($"[SyncEngine] Switching profile to '{profile.Name}' ({profile.LocalRootPath})");
 
-            // 3. Start background event processing loop
-            _loopCts = new CancellationTokenSource();
-            _processingLoopTask = Task.Run(() => RunWatcherProcessingLoopAsync(_loopCts.Token));
+                // 6. Start watcher for new root
+                _watcherService.Start(profile.LocalRootPath);
 
-            IsRunning = true;
-            Log("[SyncEngine] Automatic synchronization running.");
+                // 7. Run initial reconciliation for new root
+                await ExecuteReconciliationInternalAsync(cancellationToken);
+
+                // 8. Start background event processing loop
+                _loopCts = new CancellationTokenSource();
+                _processingLoopTask = Task.Run(() => RunWatcherProcessingLoopAsync(_loopCts.Token));
+
+                IsRunning = true;
+                Log("[SyncEngine] Automatic synchronization running on new profile.");
+            }
+            else
+            {
+                IsRunning = false;
+                Log($"[SyncEngine] Switched profile to '{profile.Name}' ({profile.LocalRootPath}) (Automatic sync idle).");
+            }
         }
         catch (Exception ex)
         {
-            Log($"[SyncEngine] Failed to start automatic synchronization: {ex.Message}", "ERROR");
+            Log($"[SyncEngine] Failed during profile switch: {ex.Message}", "ERROR");
             _watcherService.Stop();
             IsRunning = false;
             throw;
@@ -234,15 +284,15 @@ public class SyncEngine : ISyncEngine
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        // 1. Stop watcher to cease new incoming events unconditionally
+        _watcherService.Stop();
+
         if (!IsRunning && _processingLoopTask == null)
         {
             return;
         }
 
         Log("[SyncEngine] Stopping automatic synchronization...");
-
-        // 1. Stop watcher to cease new incoming events
-        _watcherService.Stop();
 
         // 2. Cancel loop
         if (_loopCts != null)
@@ -1075,35 +1125,49 @@ public class SyncEngine : ISyncEngine
         await _indexService.SaveIndexAsync(index, cancellationToken);
 
         // 7. Explicit re-backup with RESTORE change origin (Section 19, 20, 21, 22)
-        UploadCompletedResponse reBackupResp;
-        try
+        UploadCompletedResponse reBackupResp = null!;
+        for (int uploadAttempt = 0; uploadAttempt < 5; uploadAttempt++)
         {
-            reBackupResp = await _gatewayClient.BackupFileAsync(
-                backupSetId,
-                relativePath,
-                targetFullPath,
-                identity.ClientId,
-                cancellationToken,
-                precomputedSha256: downloadResult.Sha256,
-                precomputedSize: downloadResult.Size,
-                changeOrigin: BackupChangeOrigin.Restore);
-        }
-        catch (Exception ex)
-        {
-            Log($"[Restore] Server sync failed after local replace: {ex.Message}", "WARN");
-            ReconciliationRequired = true;
-            _suppressionService.RemoveSuppression(relativePath);
-            return new RestoreExecutionResult
+            try
             {
-                Success = true,
-                Status = "LOCAL_RESTORED_SYNC_PENDING",
-                RelativePath = relativePath,
-                TargetLocalPath = targetFullPath,
-                SourceVersionNumber = versionNumber,
-                Sha256Verified = downloadResult.Sha256,
-                Size = downloadResult.Size,
-                ErrorMessage = $"File restored locally, server synchronization pending: {ex}"
-            };
+                reBackupResp = await _gatewayClient.BackupFileAsync(
+                    backupSetId,
+                    relativePath,
+                    targetFullPath,
+                    identity.ClientId,
+                    cancellationToken,
+                    precomputedSha256: downloadResult.Sha256,
+                    precomputedSize: downloadResult.Size,
+                    changeOrigin: BackupChangeOrigin.Restore);
+
+                if (reBackupResp.Success || reBackupResp.ErrorCode != BackupErrorCodes.UploadInProgress)
+                {
+                    break;
+                }
+
+                await Task.Delay(100 * (uploadAttempt + 1), cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                if (uploadAttempt == 4)
+                {
+                    Log($"[Restore] Server sync failed after local replace: {ex.Message}", "WARN");
+                    ReconciliationRequired = true;
+                    _suppressionService.RemoveSuppression(relativePath);
+                    return new RestoreExecutionResult
+                    {
+                        Success = true,
+                        Status = "LOCAL_RESTORED_SYNC_PENDING",
+                        RelativePath = relativePath,
+                        TargetLocalPath = targetFullPath,
+                        SourceVersionNumber = versionNumber,
+                        Sha256Verified = downloadResult.Sha256,
+                        Size = downloadResult.Size,
+                        ErrorMessage = $"File restored locally, server synchronization pending: {ex}"
+                    };
+                }
+                await Task.Delay(100 * (uploadAttempt + 1), cancellationToken);
+            }
         }
 
         if (!reBackupResp.Success)

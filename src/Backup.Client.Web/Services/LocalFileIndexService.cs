@@ -31,8 +31,33 @@ public class LocalFileIndexService : ILocalFileIndexService
 
     public LocalFileIndexService(string? baseDirectory = null)
     {
-        _indexDirectory = baseDirectory ?? Path.Combine(AppContext.BaseDirectory, "data", "client", "index");
+        _indexDirectory = baseDirectory ?? ResolveDefaultIndexDir();
         Directory.CreateDirectory(_indexDirectory);
+    }
+
+    private static string ResolveDefaultIndexDir()
+    {
+        string? current = Directory.GetCurrentDirectory();
+        while (!string.IsNullOrEmpty(current))
+        {
+            if (File.Exists(Path.Combine(current, "BackupSystem.sln")))
+            {
+                return Path.GetFullPath(Path.Combine(current, "data", "client", "index"));
+            }
+            current = Directory.GetParent(current)?.FullName;
+        }
+
+        string? baseDir = AppContext.BaseDirectory;
+        while (!string.IsNullOrEmpty(baseDir))
+        {
+            if (File.Exists(Path.Combine(baseDir, "BackupSystem.sln")))
+            {
+                return Path.GetFullPath(Path.Combine(baseDir, "data", "client", "index"));
+            }
+            baseDir = Directory.GetParent(baseDir)?.FullName;
+        }
+
+        return Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "data", "client", "index"));
     }
 
     public string GetIndexPath(Guid backupSetId) => Path.Combine(_indexDirectory, $"{backupSetId}.json");

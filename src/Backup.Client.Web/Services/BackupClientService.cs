@@ -15,6 +15,7 @@ public interface IBackupClientService
     Task<GetVersionsResponse> GetVersionsAsync(Guid fileId, CancellationToken cancellationToken = default);
     Task<GetChangeLogResponse> GetChangeLogsAsync(Guid backupSetId, int limit = 100, CancellationToken cancellationToken = default);
     Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default);
+    Task SwitchProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default);
 }
 
 public class BackupClientService : IBackupClientService
@@ -222,5 +223,13 @@ public class BackupClientService : IBackupClientService
         }
 
         return await _syncEngine.RestoreVersionAsync(backupSetId, fileId, versionNumber, cancellationToken);
+    }
+
+    public async Task SwitchProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default)
+    {
+        if (_syncEngine != null)
+        {
+            await _syncEngine.SwitchProfileAsync(profile, cancellationToken);
+        }
     }
 }

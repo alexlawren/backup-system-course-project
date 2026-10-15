@@ -36,6 +36,7 @@ public class ClientStartupSyncWorker : BackgroundService
             if (!profile.AutomaticSyncEnabled)
             {
                 _logger.LogInformation("[ClientStartup] Saved sync profile '{Name}' has automatic sync disabled.", profile.Name);
+                await _syncEngine.SwitchProfileAsync(profile, stoppingToken);
                 return;
             }
 
