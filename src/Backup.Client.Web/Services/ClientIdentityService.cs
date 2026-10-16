@@ -19,12 +19,16 @@ public interface IClientIdentityService
 public class ClientIdentityService : IClientIdentityService
 {
     private readonly string _stateFilePath;
+    private readonly string? _defaultMachineName;
+    private readonly string? _defaultClientName;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private ClientState? _cachedState;
 
-    public ClientIdentityService(string? customStateFilePath = null)
+    public ClientIdentityService(string? customStateFilePath = null, string? defaultMachineName = null, string? defaultClientName = null)
     {
         _stateFilePath = customStateFilePath ?? ResolveDefaultStateFilePath();
+        _defaultMachineName = defaultMachineName;
+        _defaultClientName = defaultClientName;
     }
 
     public async Task<ClientState> GetStateAsync(CancellationToken cancellationToken = default)
@@ -42,8 +46,8 @@ public class ClientIdentityService : IClientIdentityService
                 _cachedState = new ClientState
                 {
                     ClientId = null,
-                    MachineName = Environment.MachineName,
-                    ClientName = Environment.MachineName
+                    MachineName = _defaultMachineName ?? Environment.MachineName,
+                    ClientName = _defaultClientName ?? _defaultMachineName ?? Environment.MachineName
                 };
                 return _cachedState;
             }
@@ -53,6 +57,15 @@ public class ClientIdentityService : IClientIdentityService
             {
                 PropertyNameCaseInsensitive = true
             }) ?? new ClientState();
+
+            if (!string.IsNullOrWhiteSpace(_defaultMachineName))
+            {
+                _cachedState.MachineName = _defaultMachineName;
+            }
+            if (!string.IsNullOrWhiteSpace(_defaultClientName))
+            {
+                _cachedState.ClientName = _defaultClientName;
+            }
 
             return _cachedState;
         }

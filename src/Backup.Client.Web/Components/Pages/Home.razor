@@ -5,6 +5,7 @@
 @inject IBackupClientService BackupService
 @inject ISyncEngine SyncEngine
 @inject ISyncProfileService ProfileService
+@inject IJSRuntime JSRuntime
 @inject ILogger<Home> Logger
 
 <PageTitle>Система резервного копирования</PageTitle>
@@ -48,15 +49,15 @@
         <div class="status-summary-item">
             <span class="status-label">Согласование</span>
             <span class="status-value">
-                <span class="status-dot @(SyncEngine.HasConflict ? "offline" : (SyncEngine.IsReconciling ? "pending" : (!SyncEngine.ReconciliationRequired ? "online" : "warning")))"></span>
-                @(SyncEngine.HasConflict ? "Конфликт" : (SyncEngine.IsReconciling ? "Синхронизация..." : (!SyncEngine.ReconciliationRequired ? "Синхронизировано" : "Требуется синхронизация")))
+                <span class="status-dot @GetReconciliationDotClass()"></span>
+                @GetReconciliationStatusText()
             </span>
         </div>
 
         <div class="status-summary-item">
             <span class="status-label">Последняя сверка</span>
             <span class="status-value mono">
-                @(SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? "Никогда")
+                @(SyncEngine.LastSuccessfulReconciliationUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? (SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? "Никогда"))
             </span>
         </div>
     </div>
@@ -132,10 +133,10 @@
     </div>
 </section>
 
-<!-- Локальный клиент -->
+<!-- Текущий клиент -->
 <section class="panel-section">
     <div class="panel-header">
-        <h2 class="panel-title">Локальный клиент</h2>
+        <h2 class="panel-title">Текущий клиент</h2>
         <div class="panel-actions">
             <button class="btn btn-primary btn-sm" @onclick="RegisterClientAsync" disabled="@isLoading">
                 Зарегистрировать клиент
@@ -146,15 +147,16 @@
     <div class="kv-grid">
         <div class="kv-row">
             <span class="kv-key">Имя компьютера:</span>
-            <span class="kv-val">@(clientState?.MachineName ?? Environment.MachineName)</span>
+            <span class="kv-val" style="font-weight: 600;">@(clientState?.MachineName ?? Environment.MachineName)</span>
         </div>
 
         <div class="kv-row">
-            <span class="kv-key">Идентификатор (ClientId):</span>
-            <span class="kv-val mono">
+            <span class="kv-key">Client ID:</span>
+            <span class="kv-val mono" style="display: flex; align-items: center; gap: 0.35rem;">
                 @if (clientState?.ClientId != null && clientState.ClientId != Guid.Empty)
                 {
-                    @clientState.ClientId
+                    <span title="@clientState.ClientId">@(clientState.ClientId.Value.ToString()[..8])...</span>
+                    <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; font-size: 0.75rem;" title="Копировать полный Client ID (@clientState.ClientId)" @onclick="() => CopyToClipboard(clientState.ClientId.Value.ToString())">Копировать</button>
                 }
                 else
                 {
@@ -235,17 +237,22 @@
             </div>
 
             <div class="kv-row">
-                <span class="kv-key">Тип набора:</span>
+                <span class="kv-key">Тип:</span>
                 <span class="kv-val">
                     @if (activeAccessMode == BackupSetAccessMode.Shared)
                     {
-                        <span class="status-badge badge-blue">Общий (Shared)</span>
+                        <span class="status-badge badge-blue">Общий</span>
                     }
                     else
                     {
-                        <span class="status-badge badge-gray">Личный (Private)</span>
+                        <span class="status-badge badge-gray">Личный</span>
                     }
                 </span>
+            </div>
+
+            <div class="kv-row">
+                <span class="kv-key">Название:</span>
+                <span class="kv-val mono" style="font-weight: 600;">@(activeBackupSetId != Guid.Empty ? backupSetName : "—")</span>
             </div>
 
             @if (activeAccessMode == BackupSetAccessMode.Shared)
@@ -254,18 +261,25 @@
                 {
                     <div class="kv-row">
                         <span class="kv-key">Код подключения:</span>
-                        <span class="kv-val mono" style="font-size: 1.05rem; font-weight: 700; letter-spacing: 0.05em; color: var(--color-primary, #60a5fa);">
-                            @activeShareCode
-                            <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 2px 8px;" @onclick="CopyShareCode">Копировать</button>
+                        <span class="kv-val mono" style="font-size: 1.05rem; font-weight: 700; letter-spacing: 0.05em; color: var(--color-primary, #60a5fa); display: flex; align-items: center; gap: 0.5rem;">
+                            <span>@activeShareCode</span>
+                            <button class="btn btn-secondary btn-sm" style="padding: 2px 8px;" @onclick="CopyShareCode">Копировать</button>
                         </span>
                     </div>
                 }
 
                 <div class="kv-row">
-                    <span class="kv-key">Участники:</span>
+                    <span class="kv-key">Роль текущего клиента:</span>
                     <span class="kv-val">
-                        @(membersList != null ? $"{membersList.Count} участник(ов)" : "1")
-                        <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 2px 8px;" @onclick="ToggleMembersViewAsync">
+                        <span class="status-badge @(GetCurrentClientRole() == "Владелец" ? "badge-blue" : "badge-gray")">@GetCurrentClientRole()</span>
+                    </span>
+                </div>
+
+                <div class="kv-row">
+                    <span class="kv-key">Участников:</span>
+                    <span class="kv-val" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span>@(membersList != null ? membersList.Count.ToString() : "1")</span>
+                        <button class="btn btn-secondary btn-sm" style="padding: 2px 8px;" @onclick="ToggleMembersViewAsync">
                             @(showMembers ? "Скрыть список" : "Показать участников")
                         </button>
                     </span>
@@ -279,18 +293,40 @@
                             @foreach (var m in membersList)
                             {
                                 <li style="margin-bottom: 0.25rem;">
-                                    <strong>@(string.IsNullOrEmpty(m.ClientName) ? m.MachineName : m.ClientName)</strong> (@m.MachineName) —
-                                    <span class="badge @(m.Role == "OWNER" ? "badge-primary" : "badge-secondary")">@(m.Role == "OWNER" ? "Владелец" : "Участник")</span>
+                                    <strong>@m.MachineName</strong> —
+                                    <span class="status-badge @(m.Role == "OWNER" ? "badge-blue" : "badge-gray")" style="font-size: 0.75rem;">@(m.Role == "OWNER" ? "Владелец" : "Участник")</span>
+                                    <span class="text-secondary mono" style="margin-left: 0.5rem;" title="@m.ClientId">(@m.ClientId.ToString()[..8]...)</span>
                                     <span class="text-secondary mono" style="margin-left: 0.5rem;">(подключён @m.JoinedAtUtc.ToLocalTime().ToString("dd.MM.yyyy HH:mm"))</span>
                                 </li>
                             }
                         </ul>
                     </div>
                 }
+
+                <div class="kv-row">
+                    <span class="kv-key">Автосинхронизация:</span>
+                    <span class="kv-val">
+                        <span class="status-badge @(SyncEngine.IsRunning ? "badge-green" : "badge-gray")">
+                            @(SyncEngine.IsRunning ? "Включена" : "Остановлена")
+                        </span>
+                    </span>
+                </div>
+
+                <div class="kv-row">
+                    <span class="kv-key">Интервал проверки:</span>
+                    <span class="kv-val mono">@($"{SyncEngine.SharedSyncInterval.TotalSeconds} с")</span>
+                </div>
+
+                <div class="kv-row">
+                    <span class="kv-key">Последняя успешная синхронизация:</span>
+                    <span class="kv-val mono">
+                        @(SyncEngine.LastSuccessfulReconciliationUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? (SyncEngine.LastReconciliationUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? "Никогда"))
+                    </span>
+                </div>
             }
 
             <div class="kv-row">
-                <span class="kv-key">Активная папка:</span>
+                <span class="kv-key">Локальная папка:</span>
                 <span class="kv-val mono">@(SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? "—")</span>
             </div>
 
@@ -317,7 +353,7 @@
                 <ul style="margin: 0.5rem 0 0 1.25rem; font-size: 0.85rem;">
                     @foreach (var c in SyncEngine.ActiveConflicts)
                     {
-                        <li><code>@c.RelativePath</code> — @c.ConflictType (сервер v@c.RemoteVersion). Автоматическая перезапись предотвращена. Сохранение конфликтующих копий отложено до Change-set #3.</li>
+                        <li><code>@c.RelativePath</code> — @c.ConflictType (сервер v@c.RemoteVersion). Автоматическое сохранение конфликтной копии выполняется в конвейере синхронизации.</li>
                     }
                 </ul>
             </div>
@@ -937,5 +973,48 @@
         if (result.Contains("completed", StringComparison.OrdinalIgnoreCase))
             return "Согласование завершено";
         return result;
+    }
+
+    private string GetReconciliationStatusText()
+    {
+        if (!isGatewayConnected) return "Нет соединения";
+        if (SyncEngine.HasConflict) return "Конфликт";
+        if (SyncEngine.IsReconciling) return "Синхронизация...";
+        if (SyncEngine.ReconciliationRequired) return "Требуется синхронизация";
+        if (SyncEngine.LastSyncResult?.Contains("error", StringComparison.OrdinalIgnoreCase) == true) return "Ошибка";
+        return "Синхронизировано";
+    }
+
+    private string GetReconciliationDotClass()
+    {
+        if (!isGatewayConnected) return "offline";
+        if (SyncEngine.HasConflict) return "offline";
+        if (SyncEngine.IsReconciling) return "pending";
+        if (SyncEngine.ReconciliationRequired) return "warning";
+        if (SyncEngine.LastSyncResult?.Contains("error", StringComparison.OrdinalIgnoreCase) == true) return "warning";
+        return "online";
+    }
+
+    private string GetCurrentClientRole()
+    {
+        var myMembership = membersList?.FirstOrDefault(m => m.ClientId == clientState?.ClientId);
+        if (myMembership != null)
+        {
+            return myMembership.Role == "OWNER" ? "Владелец" : "Участник";
+        }
+        return "Владелец";
+    }
+
+    private async Task CopyToClipboard(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", text);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning("Clipboard copy error: {Message}", ex.Message);
+        }
     }
 }

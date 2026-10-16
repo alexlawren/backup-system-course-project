@@ -18,12 +18,15 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
 {
     bool IsRunning { get; }
     bool IsReconciling { get; }
+    bool IsSharedPollingRunning { get; }
+    TimeSpan SharedSyncInterval { get; set; }
     SyncProfile? ActiveProfile { get; }
     string? CurrentLocalRootPath { get; }
     Guid? CurrentBackupSetId { get; }
     string? CurrentBackupSetName { get; }
     bool ReconciliationRequired { get; }
     DateTime? LastReconciliationUtc { get; }
+    DateTime? LastSuccessfulReconciliationUtc { get; }
     string? LastSyncResult { get; }
     int PendingEventCount { get; }
     IReadOnlyList<SyncLogEntry> RecentEvents { get; }
@@ -92,17 +95,33 @@ public class SyncEngine : ISyncEngine
     private CancellationTokenSource? _loopCts;
     private Task? _processingLoopTask;
 
+    private CancellationTokenSource? _sharedPollingCts;
+    private Task? _sharedPollingLoopTask;
+    private readonly object _sharedPollingLoopLock = new();
+
     private SyncProfile? _activeProfile;
     private int _debounceDelayMs = 750;
 
     public bool IsRunning { get; private set; }
     public bool IsReconciling { get; private set; }
+    public bool IsSharedPollingRunning
+    {
+        get
+        {
+            lock (_sharedPollingLoopLock)
+            {
+                return _sharedPollingLoopTask != null && !_sharedPollingLoopTask.IsCompleted;
+            }
+        }
+    }
+    public TimeSpan SharedSyncInterval { get; set; } = TimeSpan.FromSeconds(5);
     public SyncProfile? ActiveProfile => _activeProfile;
     public string? CurrentLocalRootPath => _activeProfile?.LocalRootPath;
     public Guid? CurrentBackupSetId => _activeProfile?.BackupSetId;
     public string? CurrentBackupSetName => _activeProfile?.Name;
     public bool ReconciliationRequired { get; private set; }
     public DateTime? LastReconciliationUtc { get; private set; }
+    public DateTime? LastSuccessfulReconciliationUtc { get; private set; }
     public string? LastSyncResult { get; private set; }
     public int PendingEventCount
     {
@@ -193,7 +212,8 @@ public class SyncEngine : ISyncEngine
         ILogger<SyncEngine> logger,
         int debounceDelayMs = 750,
         IRestoreSuppressionService? suppressionService = null,
-        ISyncProfileService? profileService = null)
+        ISyncProfileService? profileService = null,
+        TimeSpan? sharedSyncInterval = null)
     {
         _gatewayClient = gatewayClient;
         _identityService = identityService;
@@ -205,6 +225,10 @@ public class SyncEngine : ISyncEngine
         _debounceDelayMs = debounceDelayMs;
         _suppressionService = suppressionService ?? new RestoreSuppressionService();
         _profileService = profileService;
+        if (sharedSyncInterval.HasValue)
+        {
+            SharedSyncInterval = sharedSyncInterval.Value;
+        }
         _watcherService.OverflowOrErrorOccurred += OnWatcherOverflowOrError;
         _gatewayClient.Reconnected += OnGatewayReconnected;
     }
@@ -213,6 +237,10 @@ public class SyncEngine : ISyncEngine
     {
         Log("[SyncEngine] Gateway connection re-established. Full reconciliation required.", "WARN");
         ReconciliationRequired = true;
+        if (IsRunning && _activeProfile?.AccessMode == BackupSetAccessMode.Shared)
+        {
+            EnsureSharedPollingLoopStarted();
+        }
     }
 
     private void Log(string message, string level = "INFO")
@@ -257,6 +285,10 @@ public class SyncEngine : ISyncEngine
         ArgumentNullException.ThrowIfNull(profile);
         profile.AutomaticSyncEnabled = true;
         await SwitchProfileAsync(profile, cancellationToken);
+        if (profile.AccessMode == BackupSetAccessMode.Shared && IsRunning)
+        {
+            EnsureSharedPollingLoopStarted();
+        }
     }
 
     public async Task SwitchProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default)
@@ -345,11 +377,20 @@ public class SyncEngine : ISyncEngine
                 _processingLoopTask = Task.Run(() => RunWatcherProcessingLoopAsync(_loopCts.Token));
 
                 IsRunning = true;
+                if (profile.AccessMode == BackupSetAccessMode.Shared)
+                {
+                    EnsureSharedPollingLoopStarted();
+                }
+                else
+                {
+                    await StopSharedPollingLoopAsync(cancellationToken);
+                }
                 Log("[SyncEngine] Automatic synchronization running on new profile.");
             }
             else
             {
                 IsRunning = false;
+                await StopSharedPollingLoopAsync(cancellationToken);
                 Log($"[SyncEngine] Switched profile to '{profile.Name}' ({profile.LocalRootPath}) (Automatic sync idle).");
             }
         }
@@ -370,6 +411,9 @@ public class SyncEngine : ISyncEngine
     {
         // 1. Stop watcher to cease new incoming events unconditionally
         _watcherService.Stop();
+
+        // 2. Stop shared polling loop
+        await StopSharedPollingLoopAsync(cancellationToken);
 
         if (!IsRunning && _processingLoopTask == null)
         {
@@ -594,6 +638,7 @@ public class SyncEngine : ISyncEngine
             await _indexService.SaveIndexAsync(localIndex, cancellationToken);
 
             LastReconciliationUtc = DateTime.UtcNow;
+            LastSuccessfulReconciliationUtc = DateTime.UtcNow;
             ReconciliationRequired = false;
             LastSyncResult = $"Success. Uploaded: {uploadedCount}, Deleted: {deletedCount}, Unchanged: {syncPlan.UnchangedCount}.";
             Log($"[SyncEngine] Reconciliation completed. {LastSyncResult}");
@@ -1363,6 +1408,7 @@ public class SyncEngine : ISyncEngine
             else
             {
                 ReconciliationRequired = false;
+                LastSuccessfulReconciliationUtc = DateTime.UtcNow;
                 LastSyncResult = $"Success. Applied: {remoteAppliedCount} remote, Uploaded: {localUploadedCount} local, Deleted: {localDeletedCount} local.";
                 Log($"[SyncEngine] Reconciliation completed cleanly. {LastSyncResult}");
             }
@@ -2105,11 +2151,139 @@ public class SyncEngine : ISyncEngine
         };
     }
 
+    public void EnsureSharedPollingLoopStarted()
+    {
+        lock (_sharedPollingLoopLock)
+        {
+            if (_activeProfile == null || _activeProfile.AccessMode != BackupSetAccessMode.Shared || !IsRunning)
+            {
+                return;
+            }
+
+            if (_sharedPollingLoopTask != null && !_sharedPollingLoopTask.IsCompleted)
+            {
+                return; // Loop already active
+            }
+
+            _sharedPollingCts = new CancellationTokenSource();
+            var token = _sharedPollingCts.Token;
+            _sharedPollingLoopTask = Task.Run(() => RunSharedPollingLoopAsync(token), token);
+            Log($"[SyncEngine] Background shared polling loop started with interval {SharedSyncInterval.TotalSeconds:F1}s.");
+        }
+    }
+
+    private async Task StopSharedPollingLoopAsync(CancellationToken cancellationToken = default)
+    {
+        Task? taskToWait = null;
+        lock (_sharedPollingLoopLock)
+        {
+            if (_sharedPollingCts != null)
+            {
+                _sharedPollingCts.Cancel();
+                taskToWait = _sharedPollingLoopTask;
+            }
+        }
+
+        if (taskToWait != null)
+        {
+            try
+            {
+                await taskToWait.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+            }
+            catch
+            {
+                // Ignore cancellation or wait timeout
+            }
+        }
+
+        lock (_sharedPollingLoopLock)
+        {
+            _sharedPollingCts?.Dispose();
+            _sharedPollingCts = null;
+            _sharedPollingLoopTask = null;
+        }
+    }
+
+    private async Task RunSharedPollingLoopAsync(CancellationToken cancellationToken)
+    {
+        Log($"[SyncEngine] Background shared polling loop running (interval: {SharedSyncInterval.TotalSeconds:F1}s).");
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(SharedSyncInterval, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (_activeProfile == null || _activeProfile.AccessMode != BackupSetAccessMode.Shared || !IsRunning)
+            {
+                break;
+            }
+
+            bool acquired = false;
+            try
+            {
+                acquired = await _syncLock.WaitAsync(0, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch
+            {
+                acquired = false;
+            }
+
+            if (!acquired)
+            {
+                // Another reconciliation or watcher upload is currently running; skip this iteration
+                continue;
+            }
+
+            try
+            {
+                if (_activeProfile != null && _activeProfile.AccessMode == BackupSetAccessMode.Shared && IsRunning)
+                {
+                    await ExecuteSharedReconciliationInternalAsync(cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log($"[SyncEngine] Shared polling reconciliation error: {ex.Message}", "WARN");
+            }
+            finally
+            {
+                _syncLock.Release();
+            }
+        }
+
+        Log("[SyncEngine] Background shared polling loop exited.");
+    }
+
     public void Dispose()
     {
         _watcherService.OverflowOrErrorOccurred -= OnWatcherOverflowOrError;
         _gatewayClient.Reconnected -= OnGatewayReconnected;
         _watcherService.Stop();
+        if (_sharedPollingCts != null)
+        {
+            _sharedPollingCts.Cancel();
+            _sharedPollingCts.Dispose();
+            _sharedPollingCts = null;
+        }
         _loopCts?.Cancel();
         _loopCts?.Dispose();
         _syncLock.Dispose();
@@ -2120,6 +2294,7 @@ public class SyncEngine : ISyncEngine
         _watcherService.OverflowOrErrorOccurred -= OnWatcherOverflowOrError;
         _gatewayClient.Reconnected -= OnGatewayReconnected;
         _watcherService.Stop();
+        await StopSharedPollingLoopAsync();
         if (_loopCts != null)
         {
             _loopCts.Cancel();

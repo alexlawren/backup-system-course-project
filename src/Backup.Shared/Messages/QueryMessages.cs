@@ -70,6 +70,7 @@ public class ChangeLogEntryDto
     public DateTime CreatedAtUtc { get; set; }
     public Guid? ActorClientId { get; set; }
     public string? ActorClientName { get; set; }
+    public string? ActorMachineName { get; set; }
 }
 
 public class GetChangeLogResponse

@@ -175,14 +175,14 @@ $runningManifest["SyncGateway"] = @{ Pid = $gatewayProc.Id; Port = 5000; Process
 $clientWorkDir = Join-Path $RepoRoot "src\Backup.Client.Web"
 
 Write-Host "Запуск Client A (:5100)..." -ForegroundColor Yellow
-$clientAArgs = "--urls http://localhost:5100 --ClientDataRoot data/client-a --environment Development"
+$clientAArgs = "--urls http://localhost:5100 --ClientDataRoot data/client-a --environment Development --SharedSyncIntervalSeconds 3 --MachineName DESKTOP-A --ClientName ""Client A"""
 $clientAProc = Start-ServiceProcess "Client.Web.A" $clientDll "client-a" $clientWorkDir $clientAArgs
 if (-not (Wait-PortReady "127.0.0.1" 5100 $clientAProc "client-a")) { exit 1 }
 Write-Host "[OK] Client A :5100 готов (данные: data/client-a)" -ForegroundColor Green
 $runningManifest["Client.Web.A"] = @{ Pid = $clientAProc.Id; Port = 5100; ProcessName = "dotnet" }
 
 Write-Host "Запуск Client B (:5200)..." -ForegroundColor Yellow
-$clientBArgs = "--urls http://localhost:5200 --ClientDataRoot data/client-b --environment Development"
+$clientBArgs = "--urls http://localhost:5200 --ClientDataRoot data/client-b --environment Development --SharedSyncIntervalSeconds 3 --MachineName DESKTOP-B --ClientName ""Client B"""
 $clientBProc = Start-ServiceProcess "Client.Web.B" $clientDll "client-b" $clientWorkDir $clientBArgs
 if (-not (Wait-PortReady "127.0.0.1" 5200 $clientBProc "client-b")) { exit 1 }
 Write-Host "[OK] Client B :5200 готов (данные: data/client-b)" -ForegroundColor Green

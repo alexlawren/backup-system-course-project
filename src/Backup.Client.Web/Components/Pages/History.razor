@@ -49,6 +49,7 @@ else
                         <option value="RENAME">Переименование</option>
                         <option value="DELETE">Удаление</option>
                         <option value="RESTORE">Восстановление</option>
+                        <option value="CONFLICT_COPY">Конфликтная копия</option>
                     </select>
                 </div>
                 <button class="btn btn-secondary btn-sm" @onclick="LoadLogAsync" disabled="@isLoadingLog">
@@ -81,6 +82,7 @@ else
                     <thead>
                         <tr>
                             <th>Дата и время (UTC)</th>
+                            <th>Клиент</th>
                             <th>Действие</th>
                             <th>Файл</th>
                             <th>Статус</th>
@@ -93,6 +95,24 @@ else
                             <tr>
                                 <td class="mono" style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
                                     @entry.CreatedAtUtc.ToString("dd.MM.yyyy HH:mm:ss")
+                                </td>
+                                <td>
+                                    @if (!string.IsNullOrWhiteSpace(entry.ActorMachineName))
+                                    {
+                                        <span style="font-weight: 600;">@entry.ActorMachineName</span>
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(entry.ActorClientName))
+                                    {
+                                        <span style="font-weight: 600;">@entry.ActorClientName</span>
+                                    }
+                                    else if (entry.ActorClientId.HasValue && entry.ActorClientId.Value != Guid.Empty)
+                                    {
+                                        <span class="mono" title="@entry.ActorClientId.Value">@entry.ActorClientId.Value.ToString()[..8]...</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-secondary">—</span>
+                                    }
                                 </td>
                                 <td>
                                     <span class="status-badge @GetActionBadgeClass(entry.Action)">

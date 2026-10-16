@@ -882,7 +882,8 @@ public class MetadataApplicationService : IMetadataApplicationService
                 Details = cl.Details,
                 CreatedAtUtc = cl.CreatedAtUtc,
                 ActorClientId = cl.ActorClientId,
-                ActorClientName = cl.ActorClient != null ? cl.ActorClient.Name : null
+                ActorClientName = cl.ActorClient != null ? cl.ActorClient.Name : null,
+                ActorMachineName = cl.ActorClient != null ? cl.ActorClient.MachineName : null
             })
             .ToListAsync(cancellationToken);
 
