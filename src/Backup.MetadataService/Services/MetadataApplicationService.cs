@@ -297,7 +297,12 @@ public class MetadataApplicationService : IMetadataApplicationService
             ExpectedVersionNumber = expectedVersionNumber,
             ExpectedSize = request.Size,
             ExpectedSha256 = request.Sha256.Trim(),
-            OperationKind = request.ChangeOrigin == BackupChangeOrigin.Restore ? "RESTORE" : "NORMAL",
+            OperationKind = request.ChangeOrigin switch
+            {
+                BackupChangeOrigin.Restore => "RESTORE",
+                BackupChangeOrigin.ConflictCopy => "CONFLICT_COPY",
+                _ => "NORMAL"
+            },
             ActorClientId = request.ActorClientId ?? request.ClientId,
             CreatedAtUtc = DateTime.UtcNow,
             ExpiresAtUtc = DateTime.UtcNow.AddMinutes(30)
@@ -438,7 +443,25 @@ public class MetadataApplicationService : IMetadataApplicationService
             // Create ChangeLog entry
             string action = string.Equals(pending.OperationKind, "RESTORE", StringComparison.OrdinalIgnoreCase)
                 ? "RESTORE"
-                : (pending.ExpectedVersionNumber == 1 ? "CREATE" : "MODIFY");
+                : (string.Equals(pending.OperationKind, "CONFLICT_COPY", StringComparison.OrdinalIgnoreCase)
+                    ? "CONFLICT_COPY"
+                    : (pending.ExpectedVersionNumber == 1 ? "CREATE" : "MODIFY"));
+
+            string details;
+            if (string.Equals(pending.OperationKind, "RESTORE", StringComparison.OrdinalIgnoreCase))
+            {
+                details = $"Restored version {pending.ExpectedVersionNumber} with Sha256 {request.ActualSha256}";
+            }
+            else if (string.Equals(pending.OperationKind, "CONFLICT_COPY", StringComparison.OrdinalIgnoreCase))
+            {
+                string orig = request.ConflictOriginalPath ?? "original file";
+                string ver = request.ConflictOriginalVersion.HasValue ? $" v{request.ConflictOriginalVersion.Value}" : "";
+                details = $"Conflict with {orig}{ver}; local content preserved as '{file.RelativePath}'";
+            }
+            else
+            {
+                details = $"Version {pending.ExpectedVersionNumber} committed with Sha256 {request.ActualSha256}";
+            }
 
             var changeLog = new ChangeLogEntity
             {
@@ -448,9 +471,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 FileId = file.Id,
                 Action = action,
                 Status = "COMMITTED",
-                Details = string.Equals(pending.OperationKind, "RESTORE", StringComparison.OrdinalIgnoreCase)
-                    ? $"Restored version {pending.ExpectedVersionNumber} with Sha256 {request.ActualSha256}"
-                    : $"Version {pending.ExpectedVersionNumber} committed with Sha256 {request.ActualSha256}",
+                Details = details,
                 ActorClientId = request.ActorClientId ?? pending.ActorClientId ?? file.BackupSet.ClientId,
                 CreatedAtUtc = DateTime.UtcNow
             };

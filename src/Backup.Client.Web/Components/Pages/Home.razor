@@ -62,6 +62,40 @@
     </div>
 </section>
 
+@if (SyncEngine.HasConflict || SyncEngine.ResolvedConflicts.Count > 0)
+{
+    <section class="panel-section">
+        <div class="panel-header">
+            <h2 class="panel-title">
+                @(SyncEngine.HasConflict ? "Обнаружены конфликты синхронизации" : "Конфликты синхронизации разрешены")
+            </h2>
+        </div>
+        @if (SyncEngine.HasConflict)
+        {
+            <div class="alert alert-warning" style="margin-bottom: 0.5rem;">
+                @foreach (var c in SyncEngine.ActiveConflicts)
+                {
+                    <div style="margin-bottom: 0.25rem;">
+                        <strong class="mono">@c.RelativePath</strong>: Локальная и серверная версии были изменены (@c.ConflictType).
+                    </div>
+                }
+            </div>
+        }
+        @if (SyncEngine.ResolvedConflicts.Count > 0)
+        {
+            <div class="alert alert-success" style="margin-bottom: 0.5rem;">
+                @foreach (var c in SyncEngine.ResolvedConflicts.Take(5))
+                {
+                    <div style="margin-bottom: 0.25rem;">
+                        Конфликт разрешён. Локальная версия сохранена как:
+                        <span class="mono" style="font-weight: 600;">@c.ConflictCopyRelativePath</span>
+                    </div>
+                }
+            </div>
+        }
+    </section>
+}
+
 <!-- Быстрый старт -->
 <section class="panel-section">
     <h2 class="panel-title">Быстрый старт</h2>

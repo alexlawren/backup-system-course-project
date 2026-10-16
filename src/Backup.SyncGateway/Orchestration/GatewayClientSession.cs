@@ -11,6 +11,9 @@ public class ActiveUploadContext
     public string ExpectedSha256 { get; set; } = string.Empty;
     public Guid PrepareMessageId { get; set; }
     public Guid? ActorClientId { get; set; }
+    public Backup.Shared.Messages.BackupChangeOrigin ChangeOrigin { get; set; } = Backup.Shared.Messages.BackupChangeOrigin.Normal;
+    public string? ConflictOriginalPath { get; set; }
+    public int? ConflictOriginalVersion { get; set; }
 }
 
 /// <summary>

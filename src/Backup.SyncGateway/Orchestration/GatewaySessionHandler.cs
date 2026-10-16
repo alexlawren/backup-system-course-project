@@ -319,7 +319,9 @@ public class GatewaySessionHandler : IAsyncDisposable
                 Sha256 = normalizedSha,
                 ChangeOrigin = request.ChangeOrigin,
                 ActorClientId = _session.ClientId ?? request.ClientId,
-                ClientId = _session.ClientId ?? request.ClientId
+                ClientId = _session.ClientId ?? request.ClientId,
+                ConflictOriginalPath = request.ConflictOriginalPath,
+                ConflictOriginalVersion = request.ConflictOriginalVersion
             }, cancellationToken);
         }
         catch (Exception ex)
@@ -380,7 +382,10 @@ public class GatewaySessionHandler : IAsyncDisposable
             ExpectedSize = request.Size,
             ExpectedSha256 = normalizedSha,
             PrepareMessageId = header.MessageId,
-            ActorClientId = _session.ClientId ?? request.ClientId
+            ActorClientId = _session.ClientId ?? request.ClientId,
+            ChangeOrigin = request.ChangeOrigin,
+            ConflictOriginalPath = request.ConflictOriginalPath,
+            ConflictOriginalVersion = request.ConflictOriginalVersion
         };
 
         // Respond with UploadRequired
@@ -501,7 +506,9 @@ public class GatewaySessionHandler : IAsyncDisposable
             StorageKey = storeResult.StorageKey,
             ActualSize = storeResult.ActualSize,
             ActualSha256 = storeResult.ActualSha256 ?? activeOp.ExpectedSha256,
-            ActorClientId = activeOp.ActorClientId
+            ActorClientId = activeOp.ActorClientId,
+            ConflictOriginalPath = activeOp.ConflictOriginalPath,
+            ConflictOriginalVersion = activeOp.ConflictOriginalVersion
         };
 
         var commitResponse = await CommitWithRetryAsync(commitRequest, cancellationToken);

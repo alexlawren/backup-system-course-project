@@ -469,7 +469,9 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         CancellationToken cancellationToken = default,
         string? precomputedSha256 = null,
         long? precomputedSize = null,
-        BackupChangeOrigin changeOrigin = BackupChangeOrigin.Normal)
+        BackupChangeOrigin changeOrigin = BackupChangeOrigin.Normal,
+        string? conflictOriginalPath = null,
+        int? conflictOriginalVersion = null)
     {
         if (!File.Exists(absoluteFilePath))
         {
@@ -499,7 +501,9 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
                 RelativePath = normalizedRelativePath,
                 Size = fileLength,
                 Sha256 = sha256,
-                ChangeOrigin = changeOrigin
+                ChangeOrigin = changeOrigin,
+                ConflictOriginalPath = conflictOriginalPath,
+                ConflictOriginalVersion = conflictOriginalVersion
             };
 
             // 2. Send FileChanged

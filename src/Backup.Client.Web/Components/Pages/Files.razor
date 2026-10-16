@@ -103,6 +103,10 @@ else
                                     {
                                         <span class="status-badge badge-red">Удалён</span>
                                     }
+                                    else if (file.RelativePath.Contains(" (conflict ", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <span class="status-badge badge-orange">Конфликтная копия</span>
+                                    }
                                     else
                                     {
                                         <span class="status-badge badge-green">Активен</span>

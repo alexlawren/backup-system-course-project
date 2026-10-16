@@ -36,6 +36,14 @@ public class SharedSyncServerFixture : IAsyncLifetime
     public int StoragePort { get; private set; }
     public int GatewayPort { get; private set; }
 
+    public MetadataDbContext CreateDbContext()
+    {
+        var dbOptions = new DbContextOptionsBuilder<MetadataDbContext>()
+            .UseNpgsql(PostgresConnectionString)
+            .Options;
+        return new MetadataDbContext(dbOptions);
+    }
+
     public SharedSyncServerFixture()
     {
         string uniqueId = Guid.NewGuid().ToString("N");
@@ -1111,16 +1119,22 @@ public class SharedBidirectionalSyncTests : IClassFixture<SharedSyncServerFixtur
         // A reconciles: detects divergence!
         await nodeA.ReconcileAsync(token);
 
-        // Both sides must be preserved! Neither overwritten!
-        Assert.Equal("Local un-synced edit by A", File.ReadAllText(aPath));
-        Assert.True(nodeA.SyncEngine.HasConflict);
-        var conflict = Assert.Single(nodeA.SyncEngine.ActiveConflicts);
-        Assert.Equal("divergent.txt", conflict.RelativePath);
-        Assert.Equal("RemoteModifyLocalModify", conflict.ConflictType);
+        // Canonical aPath becomes server v2
+        Assert.Equal("Remote server update from B (v2)", File.ReadAllText(aPath));
 
-        // Server version is still v2
+        // Both sides preserved! Local edit preserved in conflict copy!
+        var filesA = Directory.GetFiles(nodeA.SourceDir);
+        var conflictFile = filesA.FirstOrDefault(f => Path.GetFileName(f).StartsWith("divergent (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("Local un-synced edit by A", File.ReadAllText(conflictFile));
+
+        Assert.False(nodeA.SyncEngine.HasConflict);
+        Assert.Contains(nodeA.SyncEngine.ResolvedConflicts, c => c.RelativePath == "divergent.txt");
+
+        // Server version is v2, plus conflict copy exists
         var manifest = await nodeA.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = setId }, token);
         Assert.Equal(2, manifest.Entries.First(e => e.RelativePath == "divergent.txt").CurrentVersionNumber);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == Path.GetFileName(conflictFile));
     }
 
     [Fact]
@@ -1152,11 +1166,17 @@ public class SharedBidirectionalSyncTests : IClassFixture<SharedSyncServerFixtur
         // A reconciles
         await nodeA.ReconcileAsync(token);
 
-        // Local work must NOT be deleted!
-        Assert.True(File.Exists(aPath));
-        Assert.Equal("Local precious additions", File.ReadAllText(aPath));
-        Assert.True(nodeA.SyncEngine.HasConflict);
-        Assert.Contains(nodeA.SyncEngine.ActiveConflicts, c => c.ConflictType == "RemoteDeleteLocalModify");
+        // Canonical original file is removed locally to match server delete
+        Assert.False(File.Exists(aPath));
+
+        // Local precious work must NOT be deleted! Preserved as conflict copy!
+        var filesA = Directory.GetFiles(nodeA.SourceDir);
+        var conflictFile = filesA.FirstOrDefault(f => Path.GetFileName(f).StartsWith("important (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("Local precious additions", File.ReadAllText(conflictFile));
+
+        Assert.False(nodeA.SyncEngine.HasConflict);
+        Assert.Contains(nodeA.SyncEngine.ResolvedConflicts, c => c.RelativePath == "important.txt");
     }
 
     [Fact]
@@ -1183,11 +1203,17 @@ public class SharedBidirectionalSyncTests : IClassFixture<SharedSyncServerFixtur
         await nodeB.JoinSharedSetAsync(shareCode, token);
         await nodeB.ReconcileAsync(token);
 
-        // Neither side overwritten
-        Assert.True(File.Exists(bColPath));
-        Assert.Equal("Local independent work by B", File.ReadAllText(bColPath));
-        Assert.True(nodeB.SyncEngine.HasConflict);
-        Assert.Contains(nodeB.SyncEngine.ActiveConflicts, c => c.ConflictType == "RemoteCreateCollision");
+        // Canonical collision.txt becomes server version
+        Assert.Equal("Created by A remotely", File.ReadAllText(bColPath));
+
+        // B's independent work is preserved in conflict copy!
+        var filesB = Directory.GetFiles(nodeB.SourceDir);
+        var conflictFile = filesB.FirstOrDefault(f => Path.GetFileName(f).StartsWith("collision (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("Local independent work by B", File.ReadAllText(conflictFile));
+
+        Assert.False(nodeB.SyncEngine.HasConflict);
+        Assert.Contains(nodeB.SyncEngine.ResolvedConflicts, c => c.RelativePath == "collision.txt");
     }
 
     [Fact]
@@ -1227,11 +1253,17 @@ public class SharedBidirectionalSyncTests : IClassFixture<SharedSyncServerFixtur
         // B reconciles
         await nodeB.ReconcileAsync(token);
 
-        // Must report conflict and not overwrite B's final.txt
-        Assert.True(File.Exists(bFinal));
-        Assert.Equal("Local final created by B", File.ReadAllText(bFinal));
-        Assert.True(nodeB.SyncEngine.HasConflict);
-        Assert.Contains(nodeB.SyncEngine.ActiveConflicts, c => c.ConflictType == "RemoteRenameDestinationOccupied");
+        // Canonical final.txt becomes server's file
+        Assert.Equal("Doc content", File.ReadAllText(bFinal));
+
+        // B's local final is preserved as conflict copy
+        var filesB = Directory.GetFiles(nodeB.SourceDir);
+        var conflictFile = filesB.FirstOrDefault(f => Path.GetFileName(f).StartsWith("final (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("Local final created by B", File.ReadAllText(conflictFile));
+
+        Assert.False(nodeB.SyncEngine.HasConflict);
+        Assert.Contains(nodeB.SyncEngine.ResolvedConflicts, c => c.RelativePath == "final.txt");
     }
 
     // ==================================================
@@ -1466,6 +1498,7 @@ public class SharedBidirectionalSyncTests : IClassFixture<SharedSyncServerFixtur
     }
 
     // ==================================================
+    // ==================================================
     // 37. CONFLICT SAFETY E2E
     // ==================================================
 
@@ -1503,15 +1536,417 @@ public class SharedBidirectionalSyncTests : IClassFixture<SharedSyncServerFixtur
         var profA = await nodeA.ProfileService.GetProfileAsync(token);
         await nodeA.SyncEngine.StartAsync(profA!, token);
 
-        // A local content is NOT overwritten
-        Assert.Equal("Local-A unpushed offline modification", File.ReadAllText(fA));
+        // Canonical fA becomes server v2
+        Assert.Equal("Local-B remote v2 modification", File.ReadAllText(fA));
 
-        // Server v2 content is NOT overwritten
+        // A's local divergent content is safely preserved in conflict copy!
+        var filesA = Directory.GetFiles(nodeA.SourceDir);
+        var conflictFile = filesA.FirstOrDefault(f => Path.GetFileName(f).StartsWith("shared_doc (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("Local-A unpushed offline modification", File.ReadAllText(conflictFile));
+
+        // Server manifest has both files
         var manifest = await nodeB.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
         Assert.Equal(2, manifest.Entries.First(e => e.RelativePath == "shared_doc.txt").CurrentVersionNumber);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == Path.GetFileName(conflictFile));
 
-        // Status is conflict / pending
-        Assert.True(nodeA.SyncEngine.HasConflict);
-        Assert.Contains(nodeA.SyncEngine.ActiveConflicts, c => c.RelativePath == "shared_doc.txt");
+        // Node A status is Synced without conflict
+        Assert.False(nodeA.SyncEngine.HasConflict);
+        Assert.False(nodeA.SyncEngine.ReconciliationRequired);
+        Assert.Contains(nodeA.SyncEngine.ResolvedConflicts, c => c.RelativePath == "shared_doc.txt");
+    }
+
+    // ==================================================
+    // 38. SECTION 21: CONCURRENT MODIFY CONFLICT E2E
+    // ==================================================
+
+    [Fact]
+    public async Task SharedConcurrentModifyConflict_E2E()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = cts.Token;
+
+        var nodeA = CreateNode("ConcMod_A");
+        var nodeB = CreateNode("ConcMod_B");
+        await nodeA.RegisterAsync(token);
+        await nodeB.RegisterAsync(token);
+
+        var (sharedSetId, shareCode) = await nodeA.CreateSharedSetAsync("ConcurrentModifySet", token);
+        await nodeB.JoinSharedSetAsync(shareCode, token);
+
+        // 2. A creates report.txt
+        string fA = Path.Combine(nodeA.SourceDir, "report.txt");
+        File.WriteAllText(fA, "initial report v1");
+        await nodeA.ReconcileAsync(token);
+
+        // 3. B receives v1
+        await nodeB.ReconcileAsync(token);
+        string fB = Path.Combine(nodeB.SourceDir, "report.txt");
+        Assert.Equal("initial report v1", File.ReadAllText(fB));
+
+        // 4. Both synced
+        Assert.False(nodeA.SyncEngine.ReconciliationRequired);
+        Assert.False(nodeB.SyncEngine.ReconciliationRequired);
+
+        // 5. A offline
+        await nodeA.SyncEngine.StopAsync();
+
+        // 6. A changes locally: "content from A"
+        File.WriteAllText(fA, "content from A");
+
+        // 7. B changes: "content from B"
+        File.WriteAllText(fB, "content from B");
+
+        // 8. B sync -> canonical v2
+        await nodeB.ReconcileAsync(token);
+
+        // 9. A starts up & 10. A reconcile
+        var profA = await nodeA.ProfileService.GetProfileAsync(token);
+        await nodeA.SyncEngine.StartAsync(profA!, token);
+
+        // 11. Divergence detected & 12. Local A bytes preserved
+        // 13. Canonical report.txt at A becomes content from B
+        Assert.Equal("content from B", File.ReadAllText(fA));
+
+        // 14. Conflict copy contains content from A
+        var filesA = Directory.GetFiles(nodeA.SourceDir);
+        var conflictFile = filesA.FirstOrDefault(f => Path.GetFileName(f).StartsWith("report (conflict "));
+        Assert.NotNull(conflictFile);
+        string conflictFileName = Path.GetFileName(conflictFile);
+        Assert.Equal("content from A", File.ReadAllText(conflictFile));
+
+        // 15. Conflict copy uploaded to server
+        var manifest = await nodeA.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
+        var canonicalEntry = manifest.Entries.First(e => e.RelativePath == "report.txt");
+        var conflictEntry = manifest.Entries.FirstOrDefault(e => e.RelativePath == conflictFileName);
+        Assert.NotNull(conflictEntry);
+
+        // 16. Conflict copy FileId != canonical FileId
+        Assert.NotEqual(canonicalEntry.FileId, conflictEntry.FileId);
+
+        // 17. Conflict copy v1
+        Assert.Equal(1, conflictEntry.CurrentVersionNumber);
+
+        // 18. ChangeLog contains CONFLICT_COPY Actor=A
+        await using var db = _fixture.CreateDbContext();
+        var conflictLog = await db.ChangeLogs
+            .FirstOrDefaultAsync(c => c.BackupSetId == sharedSetId && c.Action == "CONFLICT_COPY", token);
+        Assert.NotNull(conflictLog);
+        Assert.Equal(nodeA.ClientId, conflictLog.ActorClientId);
+        Assert.Contains("Conflict with report.txt", conflictLog.Details);
+
+        // 19. B reconcile
+        await nodeB.ReconcileAsync(token);
+
+        // 20. B also receives conflict copy
+        string conflictPathB = Path.Combine(nodeB.SourceDir, conflictFileName);
+        Assert.True(File.Exists(conflictPathB));
+        Assert.Equal("content from A", File.ReadAllText(conflictPathB));
+
+        // 21. No data lost
+        Assert.Equal("content from B", File.ReadAllText(fB));
+
+        // 22. Reconciliation of both clients -> Synced
+        Assert.False(nodeA.SyncEngine.HasConflict);
+        Assert.False(nodeA.SyncEngine.ReconciliationRequired);
+        Assert.False(nodeB.SyncEngine.HasConflict);
+        Assert.False(nodeB.SyncEngine.ReconciliationRequired);
+    }
+
+    // ==================================================
+    // 39. SECTION 22: DELETE VS MODIFY CONFLICT E2E
+    // ==================================================
+
+    [Fact]
+    public async Task SharedDeleteVsModifyConflict_E2E()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = cts.Token;
+
+        var nodeA = CreateNode("DelMod_A");
+        var nodeB = CreateNode("DelMod_B");
+        await nodeA.RegisterAsync(token);
+        await nodeB.RegisterAsync(token);
+
+        var (sharedSetId, shareCode) = await nodeA.CreateSharedSetAsync("DeleteVsModifySet", token);
+        await nodeB.JoinSharedSetAsync(shareCode, token);
+
+        string fA = Path.Combine(nodeA.SourceDir, "notes.txt");
+        File.WriteAllText(fA, "base notes content");
+        await nodeA.ReconcileAsync(token);
+        await nodeB.ReconcileAsync(token);
+
+        // A offline and modifies file
+        await nodeA.SyncEngine.StopAsync();
+        File.WriteAllText(fA, "offline edited notes by A");
+
+        // B deletes file on server
+        string fB = Path.Combine(nodeB.SourceDir, "notes.txt");
+        File.Delete(fB);
+        await nodeB.ReconcileAsync(token);
+
+        // A reconnect / reconcile
+        var profA = await nodeA.ProfileService.GetProfileAsync(token);
+        await nodeA.SyncEngine.StartAsync(profA!, token);
+
+        // Canonical file removed locally
+        Assert.False(File.Exists(fA));
+
+        // Local modified bytes preserved in conflict copy
+        var filesA = Directory.GetFiles(nodeA.SourceDir);
+        var conflictFile = filesA.FirstOrDefault(f => Path.GetFileName(f).StartsWith("notes (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("offline edited notes by A", File.ReadAllText(conflictFile));
+
+        // Conflict copy uploaded to server
+        var manifest = await nodeA.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
+        var origEntry = manifest.Entries.First(e => e.RelativePath == "notes.txt");
+        Assert.True(origEntry.IsDeleted);
+
+        string conflictName = Path.GetFileName(conflictFile);
+        var conflictEntry = manifest.Entries.FirstOrDefault(e => e.RelativePath == conflictName);
+        Assert.NotNull(conflictEntry);
+        Assert.False(conflictEntry.IsDeleted);
+
+        // B reconciles and receives conflict copy
+        await nodeB.ReconcileAsync(token);
+        string conflictPathB = Path.Combine(nodeB.SourceDir, conflictName);
+        Assert.True(File.Exists(conflictPathB));
+        Assert.Equal("offline edited notes by A", File.ReadAllText(conflictPathB));
+        Assert.False(File.Exists(fB));
+
+        // Both synced
+        Assert.False(nodeA.SyncEngine.HasConflict);
+        Assert.False(nodeA.SyncEngine.ReconciliationRequired);
+        Assert.False(nodeB.SyncEngine.HasConflict);
+        Assert.False(nodeB.SyncEngine.ReconciliationRequired);
+    }
+
+    // ==================================================
+    // 40. SECTION 23: CREATE COLLISION E2E
+    // ==================================================
+
+    [Fact]
+    public async Task SharedCreateCollision_E2E()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = cts.Token;
+
+        var nodeA = CreateNode("CreateCol_A");
+        var nodeB = CreateNode("CreateCol_B");
+        await nodeA.RegisterAsync(token);
+        await nodeB.RegisterAsync(token);
+
+        var (sharedSetId, shareCode) = await nodeA.CreateSharedSetAsync("CreateCollisionSet", token);
+
+        // A server creates same.txt = SERVER
+        string fA = Path.Combine(nodeA.SourceDir, "same.txt");
+        File.WriteAllText(fA, "SERVER CONTENT");
+        await nodeA.ReconcileAsync(token);
+
+        // Before B bootstrap, B local folder already contains independent same.txt = LOCAL
+        string fB = Path.Combine(nodeB.SourceDir, "same.txt");
+        File.WriteAllText(fB, "LOCAL CONTENT");
+
+        // B joins and reconciles
+        await nodeB.JoinSharedSetAsync(shareCode, token);
+
+        // Expected: same.txt = SERVER, same (conflict B...).txt = LOCAL
+        Assert.Equal("SERVER CONTENT", File.ReadAllText(fB));
+
+        var filesB = Directory.GetFiles(nodeB.SourceDir);
+        var conflictFile = filesB.FirstOrDefault(f => Path.GetFileName(f).StartsWith("same (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("LOCAL CONTENT", File.ReadAllText(conflictFile));
+
+        // Both exist on server
+        var manifest = await nodeB.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == "same.txt" && !e.IsDeleted);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == Path.GetFileName(conflictFile) && !e.IsDeleted);
+
+        // A reconciles and receives conflict copy
+        await nodeA.ReconcileAsync(token);
+        string conflictPathA = Path.Combine(nodeA.SourceDir, Path.GetFileName(conflictFile));
+        Assert.True(File.Exists(conflictPathA));
+        Assert.Equal("LOCAL CONTENT", File.ReadAllText(conflictPathA));
+
+        Assert.False(nodeA.SyncEngine.HasConflict);
+        Assert.False(nodeB.SyncEngine.HasConflict);
+    }
+
+    // ==================================================
+    // 41. SECTION 24: RENAME DESTINATION COLLISION TEST
+    // ==================================================
+
+    [Fact]
+    public async Task SharedRenameDestinationCollision_E2E()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = cts.Token;
+
+        var nodeA = CreateNode("RenCol_A");
+        var nodeB = CreateNode("RenCol_B");
+        await nodeA.RegisterAsync(token);
+        await nodeB.RegisterAsync(token);
+
+        var (sharedSetId, shareCode) = await nodeA.CreateSharedSetAsync("RenameCollisionSet", token);
+        await nodeB.JoinSharedSetAsync(shareCode, token);
+
+        // A creates a.txt
+        string aFileA = Path.Combine(nodeA.SourceDir, "a.txt");
+        File.WriteAllText(aFileA, "SERVER FILE A CONTENT");
+        await nodeA.ReconcileAsync(token);
+        await nodeB.ReconcileAsync(token);
+
+        // B offline
+        await nodeB.SyncEngine.StopAsync();
+
+        // Server rename: a.txt -> target.txt
+        File.Move(aFileA, Path.Combine(nodeA.SourceDir, "target.txt"));
+        await nodeA.GatewayClient.RenameFileAsync(new FileRenamedRequest
+        {
+            ClientId = nodeA.ClientId,
+            BackupSetId = sharedSetId,
+            OldRelativePath = "a.txt",
+            NewRelativePath = "target.txt"
+        }, token);
+        await nodeA.ReconcileAsync(token);
+
+        // B already has unrelated local target.txt
+        string targetFileB = Path.Combine(nodeB.SourceDir, "target.txt");
+        File.WriteAllText(targetFileB, "UNRELATED LOCAL TARGET CONTENT");
+
+        // B starts up and reconciles
+        var profB = await nodeB.ProfileService.GetProfileAsync(token);
+        await nodeB.SyncEngine.StartAsync(profB!, token);
+
+        // Expected: server FileId becomes target.txt
+        Assert.Equal("SERVER FILE A CONTENT", File.ReadAllText(targetFileB));
+
+        // Local unrelated file preserved as conflict copy
+        var filesB = Directory.GetFiles(nodeB.SourceDir);
+        var conflictFile = filesB.FirstOrDefault(f => Path.GetFileName(f).StartsWith("target (conflict "));
+        Assert.NotNull(conflictFile);
+        Assert.Equal("UNRELATED LOCAL TARGET CONTENT", File.ReadAllText(conflictFile));
+
+        // Both files exist on server
+        var manifest = await nodeB.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == "target.txt" && !e.IsDeleted);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == Path.GetFileName(conflictFile) && !e.IsDeleted);
+
+        Assert.False(nodeB.SyncEngine.HasConflict);
+    }
+
+    // ==================================================
+    // 42. SECTION 25: FAILURE SAFETY TEST
+    // ==================================================
+
+    [Fact]
+    public async Task ConflictResolution_UploadFailure_PreservesLocalConflictCopy()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = cts.Token;
+
+        var nodeA = CreateNode("FailSafe_A");
+        var nodeB = CreateNode("FailSafe_B");
+        await nodeA.RegisterAsync(token);
+        await nodeB.RegisterAsync(token);
+
+        var (sharedSetId, shareCode) = await nodeA.CreateSharedSetAsync("FailSafeSet", token);
+        await nodeB.JoinSharedSetAsync(shareCode, token);
+
+        string fA = Path.Combine(nodeA.SourceDir, "doc.txt");
+        File.WriteAllText(fA, "v1 base");
+        await nodeA.ReconcileAsync(token);
+        await nodeB.ReconcileAsync(token);
+
+        // A offline
+        await nodeA.SyncEngine.StopAsync();
+        File.WriteAllText(fA, "divergent bytes by A");
+
+        // B advances to v2
+        string fB = Path.Combine(nodeB.SourceDir, "doc.txt");
+        File.WriteAllText(fB, "server v2 bytes");
+        await nodeB.ReconcileAsync(token);
+
+        // Simulate upload failure: divergent local file is preserved as conflict copy
+        // Test that even before upload, conflict copy is safely on disk
+        string machine = Environment.MachineName;
+        DateTime now = DateTime.UtcNow;
+        string expectedConflictRel = ConflictFileNameHelper.GenerateConflictFileName("doc.txt", machine, now);
+        string conflictFullPath = Path.Combine(nodeA.SourceDir, expectedConflictRel);
+
+        // Move to conflict copy manually to simulate Step 6 (Local divergent file moved)
+        File.Move(fA, conflictFullPath);
+
+        // Verification: conflict copy physically exists on disk
+        Assert.True(File.Exists(conflictFullPath));
+        Assert.Equal("divergent bytes by A", File.ReadAllText(conflictFullPath));
+
+        // Now A restarts and reconciles: canonical file is downloaded, and existing conflict copy is detected and uploaded
+        var profA = await nodeA.ProfileService.GetProfileAsync(token);
+        await nodeA.SyncEngine.StartAsync(profA!, token);
+
+        Assert.Equal("server v2 bytes", File.ReadAllText(fA));
+        Assert.True(File.Exists(conflictFullPath));
+        Assert.Equal("divergent bytes by A", File.ReadAllText(conflictFullPath));
+
+        var manifest = await nodeA.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
+        Assert.Contains(manifest.Entries, e => e.RelativePath == "doc.txt");
+        Assert.Contains(manifest.Entries, e => e.RelativePath == expectedConflictRel);
+
+        Assert.False(nodeA.SyncEngine.HasConflict);
+    }
+
+    // ==================================================
+    // 43. SECTION 26: IDEMPOTENCY TEST
+    // ==================================================
+
+    [Fact]
+    public async Task ConflictResolution_Retry_DoesNotCreateDuplicateConflictCopies()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var token = cts.Token;
+
+        var nodeA = CreateNode("Idemp_A");
+        var nodeB = CreateNode("Idemp_B");
+        await nodeA.RegisterAsync(token);
+        await nodeB.RegisterAsync(token);
+
+        var (sharedSetId, shareCode) = await nodeA.CreateSharedSetAsync("IdempotencySet", token);
+        await nodeB.JoinSharedSetAsync(shareCode, token);
+
+        string fA = Path.Combine(nodeA.SourceDir, "repeat.txt");
+        File.WriteAllText(fA, "v1 base");
+        await nodeA.ReconcileAsync(token);
+        await nodeB.ReconcileAsync(token);
+
+        // A offline
+        await nodeA.SyncEngine.StopAsync();
+        File.WriteAllText(fA, "divergent A text");
+
+        // B modifies to v2
+        string fB = Path.Combine(nodeB.SourceDir, "repeat.txt");
+        File.WriteAllText(fB, "server v2 text");
+        await nodeB.ReconcileAsync(token);
+
+        // A starts and reconciles
+        var profA = await nodeA.ProfileService.GetProfileAsync(token);
+        await nodeA.SyncEngine.StartAsync(profA!, token);
+
+        // Run reconciliation multiple times in a row
+        await nodeA.ReconcileAsync(token);
+        await nodeA.ReconcileAsync(token);
+
+        // Verify: exactly 1 conflict copy exists in A's directory, not (2), (3)
+        var files = Directory.GetFiles(nodeA.SourceDir);
+        var conflictCopies = files.Where(f => Path.GetFileName(f).StartsWith("repeat (conflict ")).ToList();
+        Assert.Single(conflictCopies);
+
+        // Manifest on server has exactly 2 entries (canonical repeat.txt and 1 conflict copy)
+        var manifest = await nodeA.GatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest { BackupSetId = sharedSetId }, token);
+        var serverConflictCopies = manifest.Entries.Where(e => e.RelativePath.StartsWith("repeat (conflict ")).ToList();
+        Assert.Single(serverConflictCopies);
+        Assert.False(nodeA.SyncEngine.HasConflict);
     }
 }

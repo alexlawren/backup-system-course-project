@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Backup.Shared.Errors;
 using Backup.Shared.Messages;
+using Backup.Shared.Storage;
 using Backup.Shared.Validation;
 using Microsoft.Extensions.Logging;
 
@@ -27,6 +28,7 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
     int PendingEventCount { get; }
     IReadOnlyList<SyncLogEntry> RecentEvents { get; }
     IReadOnlyList<SharedSyncConflict> ActiveConflicts { get; }
+    IReadOnlyList<SharedSyncConflict> ResolvedConflicts { get; }
     bool HasConflict { get; }
 
     Task StartAsync(SyncProfile profile, CancellationToken cancellationToken = default);
@@ -38,14 +40,25 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
 
 public class SharedSyncConflict
 {
+    public Guid ConflictId { get; set; } = Guid.NewGuid();
+    public Guid BackupSetId { get; set; }
     public Guid? FileId { get; set; }
     public string RelativePath { get; set; } = string.Empty;
     public string ConflictType { get; set; } = string.Empty;
+    public Guid? ClientId { get; set; }
+    public string? ClientName { get; set; }
     public string? LocalSha256 { get; set; }
+    public long? LocalSize { get; set; }
     public string? RemoteSha256 { get; set; }
-    public int? LocalBaseVersion { get; set; }
+    public int? BaseVersion { get; set; }
+    public int? LocalBaseVersion { get => BaseVersion; set => BaseVersion = value; }
     public int RemoteVersion { get; set; }
     public DateTime DetectedAtUtc { get; set; } = DateTime.UtcNow;
+    public string Status { get; set; } = "PENDING";
+    public string? ConflictCopyRelativePath { get; set; }
+    public string? LocalDivergentFullPath { get; set; }
+    public BackupSetManifestEntryDto? ManifestEntry { get; set; }
+    public string? OldRelativePath { get; set; }
 }
 
 public class DebouncedFileEvent
@@ -103,6 +116,7 @@ public class SyncEngine : ISyncEngine
     }
 
     private readonly List<SharedSyncConflict> _activeConflicts = new();
+    private readonly List<SharedSyncConflict> _resolvedConflicts = new();
     private readonly object _conflictsLock = new();
 
     public IReadOnlyList<SharedSyncConflict> ActiveConflicts
@@ -112,6 +126,17 @@ public class SyncEngine : ISyncEngine
             lock (_conflictsLock)
             {
                 return _activeConflicts.ToList();
+            }
+        }
+    }
+
+    public IReadOnlyList<SharedSyncConflict> ResolvedConflicts
+    {
+        get
+        {
+            lock (_conflictsLock)
+            {
+                return _resolvedConflicts.ToList();
             }
         }
     }
@@ -133,7 +158,18 @@ public class SyncEngine : ISyncEngine
         {
             _activeConflicts.Add(conflict);
         }
-        Log($"[SyncEngine] Conflict detected on '{conflict.RelativePath}' ({conflict.ConflictType}). Deferred to Change-set #3.", "WARN");
+        Log($"[SyncEngine] Conflict detected on '{conflict.RelativePath}' ({conflict.ConflictType}).", "WARN");
+    }
+
+    private void MarkConflictResolved(SharedSyncConflict conflict, string conflictCopyRelPath)
+    {
+        lock (_conflictsLock)
+        {
+            conflict.Status = "RESOLVED_CONFLICT_COPY";
+            conflict.ConflictCopyRelativePath = conflictCopyRelPath;
+            _activeConflicts.Remove(conflict);
+            _resolvedConflicts.Add(conflict);
+        }
     }
 
     public IReadOnlyList<SyncLogEntry> RecentEvents
@@ -628,6 +664,7 @@ public class SyncEngine : ISyncEngine
             var remoteDownloads = new List<BackupSetManifestEntryDto>();
             var remoteRenames = new List<(string OldRelative, string NewRelative, BackupSetManifestEntryDto Entry)>();
             var remoteDeletes = new List<(string RelativePath, BackupSetManifestEntryDto Entry)>();
+            var conflictsToResolve = new List<SharedSyncConflict>();
 
             var processedServerFileIds = new HashSet<Guid>();
 
@@ -655,14 +692,22 @@ public class SyncEngine : ISyncEngine
                         else
                         {
                             // Modified locally or untracked -> CONFLICT
-                            AddConflict(new SharedSyncConflict
+                            var conflict = new SharedSyncConflict
                             {
+                                BackupSetId = backupSetId,
                                 FileId = mEntry.FileId,
                                 RelativePath = normPath,
                                 ConflictType = "RemoteDeleteLocalModify",
                                 LocalSha256 = localFile.Sha256,
-                                RemoteVersion = mEntry.CurrentVersionNumber
-                            });
+                                LocalSize = localFile.Size,
+                                RemoteVersion = mEntry.CurrentVersionNumber,
+                                ClientId = identity.ClientId,
+                                ClientName = Environment.MachineName,
+                                LocalDivergentFullPath = Path.Combine(root, normPath),
+                                ManifestEntry = mEntry
+                            };
+                            AddConflict(conflict);
+                            conflictsToResolve.Add(conflict);
                         }
                     }
                     else
@@ -687,26 +732,48 @@ public class SyncEngine : ISyncEngine
                     // Source exists locally. Is destination occupied?
                     if (localFiles.ContainsKey(mEntry.RelativePath) || localFiles.ContainsKey(normPath))
                     {
-                        AddConflict(new SharedSyncConflict
+                        localFiles.TryGetValue(mEntry.RelativePath, out var destLocalFile);
+                        if (destLocalFile == null) localFiles.TryGetValue(normPath, out destLocalFile);
+
+                        var conflict = new SharedSyncConflict
                         {
+                            BackupSetId = backupSetId,
                             FileId = mEntry.FileId,
                             RelativePath = normPath,
                             ConflictType = "RemoteRenameDestinationOccupied",
-                            RemoteVersion = mEntry.CurrentVersionNumber
-                        });
+                            LocalSha256 = destLocalFile?.Sha256,
+                            LocalSize = destLocalFile?.Size,
+                            RemoteVersion = mEntry.CurrentVersionNumber,
+                            ClientId = identity.ClientId,
+                            ClientName = Environment.MachineName,
+                            LocalDivergentFullPath = Path.Combine(root, normPath),
+                            ManifestEntry = mEntry,
+                            OldRelativePath = existingIndexRename.RelativePath
+                        };
+                        AddConflict(conflict);
+                        conflictsToResolve.Add(conflict);
                     }
                     else if (!string.IsNullOrEmpty(existingIndexRename.LastSyncedSha256)
                         && !string.Equals(existingIndexRename.LastSyncedSha256, oldLocalFile.Sha256, StringComparison.OrdinalIgnoreCase))
                     {
                         // Source file was locally modified -> CONFLICT
-                        AddConflict(new SharedSyncConflict
+                        var conflict = new SharedSyncConflict
                         {
+                            BackupSetId = backupSetId,
                             FileId = mEntry.FileId,
-                            RelativePath = existingIndexRename.RelativePath,
+                            RelativePath = normPath,
                             ConflictType = "RemoteRenameSourceModified",
                             LocalSha256 = oldLocalFile.Sha256,
-                            RemoteVersion = mEntry.CurrentVersionNumber
-                        });
+                            LocalSize = oldLocalFile.Size,
+                            RemoteVersion = mEntry.CurrentVersionNumber,
+                            ClientId = identity.ClientId,
+                            ClientName = Environment.MachineName,
+                            LocalDivergentFullPath = Path.Combine(root, existingIndexRename.RelativePath),
+                            ManifestEntry = mEntry,
+                            OldRelativePath = existingIndexRename.RelativePath
+                        };
+                        AddConflict(conflict);
+                        conflictsToResolve.Add(conflict);
                     }
                     else
                     {
@@ -736,14 +803,8 @@ public class SyncEngine : ISyncEngine
                     }
                     else if (hasIdx && idx != null && idx.LastSyncedServerVersion > 0 && mEntry.CurrentVersionNumber > idx.LastSyncedServerVersion)
                     {
-                        // Concurrently modified remotely while deleted locally -> CONFLICT
-                        AddConflict(new SharedSyncConflict
-                        {
-                            FileId = mEntry.FileId,
-                            RelativePath = normPath,
-                            ConflictType = "RemoteModifyLocalDelete",
-                            RemoteVersion = mEntry.CurrentVersionNumber
-                        });
+                        // Concurrently modified remotely while deleted locally -> remote wins canonical
+                        remoteDownloads.Add(mEntry);
                     }
                     else
                     {
@@ -789,16 +850,24 @@ public class SyncEngine : ISyncEngine
                             else
                             {
                                 // Both sides changed -> CONFLICT
-                                AddConflict(new SharedSyncConflict
+                                var conflict = new SharedSyncConflict
                                 {
+                                    BackupSetId = backupSetId,
                                     FileId = mEntry.FileId,
                                     RelativePath = normPath,
                                     ConflictType = "RemoteModifyLocalModify",
                                     LocalSha256 = currentLocal.Sha256,
+                                    LocalSize = currentLocal.Size,
                                     RemoteSha256 = mEntry.Sha256,
-                                    LocalBaseVersion = idx.LastSyncedServerVersion,
-                                    RemoteVersion = mEntry.CurrentVersionNumber
-                                });
+                                    BaseVersion = idx.LastSyncedServerVersion,
+                                    RemoteVersion = mEntry.CurrentVersionNumber,
+                                    ClientId = identity.ClientId,
+                                    ClientName = Environment.MachineName,
+                                    LocalDivergentFullPath = Path.Combine(root, normPath),
+                                    ManifestEntry = mEntry
+                                };
+                                AddConflict(conflict);
+                                conflictsToResolve.Add(conflict);
                             }
                         }
                         else if (hasIdx && idx != null && idx.LastSyncedServerVersion == mEntry.CurrentVersionNumber)
@@ -808,15 +877,23 @@ public class SyncEngine : ISyncEngine
                         else
                         {
                             // Collision between untracked local file and server file with different hash -> CONFLICT
-                            AddConflict(new SharedSyncConflict
+                            var conflict = new SharedSyncConflict
                             {
+                                BackupSetId = backupSetId,
                                 FileId = mEntry.FileId,
                                 RelativePath = normPath,
                                 ConflictType = "RemoteCreateCollision",
                                 LocalSha256 = currentLocal.Sha256,
+                                LocalSize = currentLocal.Size,
                                 RemoteSha256 = mEntry.Sha256,
-                                RemoteVersion = mEntry.CurrentVersionNumber
-                            });
+                                RemoteVersion = mEntry.CurrentVersionNumber,
+                                ClientId = identity.ClientId,
+                                ClientName = Environment.MachineName,
+                                LocalDivergentFullPath = Path.Combine(root, normPath),
+                                ManifestEntry = mEntry
+                            };
+                            AddConflict(conflict);
+                            conflictsToResolve.Add(conflict);
                         }
                     }
                 }
@@ -939,6 +1016,209 @@ public class SyncEngine : ISyncEngine
                 }
             }
 
+            // 4d. Resolve Conflicts via Conflict Copies
+            foreach (var c in conflictsToResolve)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string sourceForNaming = c.ConflictType == "RemoteRenameSourceModified" && !string.IsNullOrEmpty(c.OldRelativePath)
+                    ? c.OldRelativePath
+                    : c.RelativePath;
+
+                string localDivergentPath = c.LocalDivergentFullPath ?? Path.Combine(root, sourceForNaming);
+
+                if (!File.Exists(localDivergentPath))
+                {
+                    continue;
+                }
+
+                // 1. Wait for stability
+                bool stable = await _stabilityHelper.WaitForFileStabilityAsync(localDivergentPath, cancellationToken);
+                if (!stable)
+                {
+                    Log($"[SyncEngine] Local divergent file '{sourceForNaming}' is locked. Deferring resolution.", "WARN");
+                    ReconciliationRequired = true;
+                    continue;
+                }
+
+                // 2. Compute local hash & size
+                long localSize = c.LocalSize ?? new FileInfo(localDivergentPath).Length;
+                string localSha = c.LocalSha256 ?? await FileStreamingHelper.ComputeFileSha256Async(localDivergentPath, cancellationToken);
+
+                // 3. Resolve conflict copy path
+                string machineName = c.ClientName ?? Environment.MachineName;
+                string conflictRelPath = ConflictFileNameHelper.ResolveUniqueConflictRelativePath(
+                    root,
+                    sourceForNaming,
+                    machineName,
+                    c.DetectedAtUtc,
+                    localSha);
+
+                string conflictFullPath = Path.Combine(root, conflictRelPath);
+
+                // 4. Ensure target directory exists
+                string? conflictDir = Path.GetDirectoryName(conflictFullPath);
+                if (!string.IsNullOrEmpty(conflictDir) && !Directory.Exists(conflictDir))
+                {
+                    Directory.CreateDirectory(conflictDir);
+                }
+
+                // 5. Watcher suppression
+                _suppressionService?.RegisterSuppression(conflictRelPath, localSha, TimeSpan.FromSeconds(60));
+                _suppressionService?.RegisterSuppression(c.RelativePath, c.RemoteSha256 ?? string.Empty, TimeSpan.FromSeconds(60));
+                if (!string.IsNullOrEmpty(c.OldRelativePath))
+                {
+                    _suppressionService?.RegisterSuppression(c.OldRelativePath, string.Empty, TimeSpan.FromSeconds(60));
+                }
+
+                // 6. FAILURE SAFETY: Move local divergent file to conflict copy path
+                if (string.Equals(Path.GetFullPath(localDivergentPath), Path.GetFullPath(conflictFullPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    // Already at conflict path
+                }
+                else
+                {
+                    if (File.Exists(conflictFullPath))
+                    {
+                        File.Delete(conflictFullPath);
+                    }
+                    File.Move(localDivergentPath, conflictFullPath);
+                }
+
+                if (!File.Exists(conflictFullPath))
+                {
+                    Log($"[SyncEngine] Conflict copy creation failed at '{conflictFullPath}'.", "ERROR");
+                    ReconciliationRequired = true;
+                    continue;
+                }
+
+                // 7. Update canonical path with server state
+                if (c.ConflictType == "RemoteDeleteLocalModify")
+                {
+                    string canonicalFull = Path.Combine(root, c.RelativePath);
+                    if (File.Exists(canonicalFull))
+                    {
+                        File.Delete(canonicalFull);
+                    }
+                    localIndex.Entries.Remove(c.RelativePath);
+                }
+                else if (c.ConflictType == "RemoteRenameDestinationOccupied")
+                {
+                    string oldFull = Path.Combine(root, c.OldRelativePath!);
+                    string destFull = Path.Combine(root, c.RelativePath);
+                    if (File.Exists(oldFull))
+                    {
+                        string? destDir = Path.GetDirectoryName(destFull);
+                        if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
+                        {
+                            Directory.CreateDirectory(destDir);
+                        }
+                        if (File.Exists(destFull))
+                        {
+                            File.Delete(destFull);
+                        }
+                        File.Move(oldFull, destFull);
+                        localIndex.Entries.Remove(c.OldRelativePath!);
+                        localIndex.Entries[c.RelativePath] = new LocalFileIndexEntry
+                        {
+                            RelativePath = c.RelativePath,
+                            Size = c.ManifestEntry!.Size,
+                            LastWriteTimeUtc = File.GetLastWriteTimeUtc(destFull),
+                            Sha256 = c.ManifestEntry.Sha256,
+                            FileId = c.ManifestEntry.FileId,
+                            LastSyncedServerVersion = c.ManifestEntry.CurrentVersionNumber,
+                            LastSyncedSha256 = c.ManifestEntry.Sha256,
+                            IsDeletedOnServer = false
+                        };
+                    }
+                }
+                else // RemoteModifyLocalModify, RemoteCreateCollision, RemoteRenameSourceModified
+                {
+                    var dlResult = await _gatewayClient.DownloadSharedFileVersionAsync(new DownloadFileVersionRequest
+                    {
+                        BackupSetId = backupSetId,
+                        FileId = c.ManifestEntry!.FileId,
+                        VersionNumber = c.ManifestEntry.CurrentVersionNumber,
+                        ClientId = identity.ClientId
+                    }, root, cancellationToken);
+
+                    if (dlResult.Success)
+                    {
+                        if (File.Exists(dlResult.TargetFilePath))
+                        {
+                            File.Delete(dlResult.TargetFilePath);
+                        }
+                        File.Move(dlResult.TempFilePath, dlResult.TargetFilePath);
+
+                        localIndex.Entries[c.RelativePath] = new LocalFileIndexEntry
+                        {
+                            RelativePath = c.RelativePath,
+                            Size = dlResult.Size,
+                            LastWriteTimeUtc = File.GetLastWriteTimeUtc(dlResult.TargetFilePath),
+                            Sha256 = dlResult.Sha256 ?? c.ManifestEntry.Sha256,
+                            FileId = c.ManifestEntry.FileId,
+                            LastSyncedServerVersion = c.ManifestEntry.CurrentVersionNumber,
+                            LastSyncedSha256 = dlResult.Sha256 ?? c.ManifestEntry.Sha256,
+                            IsDeletedOnServer = false
+                        };
+
+                        if (c.ConflictType == "RemoteRenameSourceModified" && !string.IsNullOrEmpty(c.OldRelativePath))
+                        {
+                            localIndex.Entries.Remove(c.OldRelativePath);
+                        }
+                    }
+                    else
+                    {
+                        Log($"[SyncEngine] Failed to download canonical version for '{c.RelativePath}': {dlResult.ErrorMessage}. Conflict copy preserved.", "WARN");
+                        ReconciliationRequired = true;
+                    }
+                }
+
+                // 8. Save local index after canonical update
+                await _indexService.SaveIndexAsync(localIndex, cancellationToken);
+
+                // 9. Upload conflict copy as new logical file
+                if (File.Exists(conflictFullPath))
+                {
+                    var uploadResp = await _gatewayClient.BackupFileAsync(
+                        backupSetId,
+                        conflictRelPath,
+                        conflictFullPath,
+                        identity.ClientId,
+                        cancellationToken,
+                        localSha,
+                        localSize,
+                        BackupChangeOrigin.ConflictCopy,
+                        conflictOriginalPath: sourceForNaming,
+                        conflictOriginalVersion: c.RemoteVersion);
+
+                    if (uploadResp.Success)
+                    {
+                        int v = uploadResp.VersionNumber ?? 1;
+                        localIndex.Entries[conflictRelPath] = new LocalFileIndexEntry
+                        {
+                            RelativePath = conflictRelPath,
+                            Size = localSize,
+                            LastWriteTimeUtc = File.GetLastWriteTimeUtc(conflictFullPath),
+                            Sha256 = localSha,
+                            FileId = uploadResp.FileId,
+                            LastSyncedServerVersion = v,
+                            LastSyncedSha256 = localSha,
+                            IsDeletedOnServer = false
+                        };
+                        await _indexService.SaveIndexAsync(localIndex, cancellationToken);
+
+                        MarkConflictResolved(c, conflictRelPath);
+                        Log($"[SyncEngine] Conflict resolved: '{c.RelativePath}' preserved as '{conflictRelPath}' (FileId: {uploadResp.FileId}, v{v})");
+                    }
+                    else
+                    {
+                        Log($"[SyncEngine] Conflict copy '{conflictRelPath}' preserved on disk, but upload failed: {uploadResp.ErrorMessage}. Will retry on next reconciliation.", "WARN");
+                        ReconciliationRequired = true;
+                    }
+                }
+            }
+
             // PHASE 5: Rescan local directory
             var postScan = await _scanner.ScanDirectoryAsync(root, localIndex, cancellationToken);
             var currentLocalFiles = postScan.ScannedIndexEntries;
@@ -958,9 +1238,19 @@ public class SyncEngine : ISyncEngine
                     continue; // Skip conflicted files
                 }
 
+                bool isAlreadySynced = localIndex.Entries.TryGetValue(relPath, out var idx)
+                    && idx != null
+                    && idx.LastSyncedServerVersion > 0
+                    && string.Equals(idx.LastSyncedSha256, localFile.Sha256, StringComparison.OrdinalIgnoreCase);
+
+                if (isAlreadySynced)
+                {
+                    continue;
+                }
+
                 bool isLocalCreate = !manifestByPath.TryGetValue(relPath, out var serverEntry) || serverEntry.IsDeleted;
                 bool isLocalModify = !isLocalCreate && serverEntry != null
-                    && serverEntry.CurrentVersionNumber == (localIndex.Entries.TryGetValue(relPath, out var idx) ? idx.LastSyncedServerVersion : 0)
+                    && serverEntry.CurrentVersionNumber == (idx != null ? idx.LastSyncedServerVersion : 0)
                     && !string.Equals(serverEntry.Sha256, localFile.Sha256, StringComparison.OrdinalIgnoreCase);
 
                 if (isLocalCreate || isLocalModify)
@@ -974,6 +1264,10 @@ public class SyncEngine : ISyncEngine
                         continue;
                     }
 
+                    var changeOrigin = relPath.Contains(" (conflict ", StringComparison.OrdinalIgnoreCase)
+                        ? BackupChangeOrigin.ConflictCopy
+                        : BackupChangeOrigin.Normal;
+
                     var uploadResp = await _gatewayClient.BackupFileAsync(
                         backupSetId,
                         relPath,
@@ -981,7 +1275,8 @@ public class SyncEngine : ISyncEngine
                         identity.ClientId,
                         cancellationToken,
                         localFile.Sha256,
-                        localFile.Size);
+                        localFile.Size,
+                        changeOrigin: changeOrigin);
 
                     if (uploadResp.Success)
                     {
@@ -1043,14 +1338,9 @@ public class SyncEngine : ISyncEngine
                     }
                     else
                     {
-                        // Server modified while locally deleted -> CONFLICT
-                        AddConflict(new SharedSyncConflict
-                        {
-                            FileId = mEntry.FileId,
-                            RelativePath = normDelPath,
-                            ConflictType = "RemoteModifyLocalDelete",
-                            RemoteVersion = mEntry.CurrentVersionNumber
-                        });
+                        // Server modified while locally deleted -> remote wins canonical
+                        localIndex.Entries.Remove(delPath);
+                        localIndex.Entries.Remove(normDelPath);
                     }
                 }
                 else

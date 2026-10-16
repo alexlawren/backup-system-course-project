@@ -9,6 +9,8 @@ public class PrepareVersionRequest
     public BackupChangeOrigin ChangeOrigin { get; set; } = BackupChangeOrigin.Normal;
     public Guid? ActorClientId { get; set; }
     public Guid? ClientId { get; set; }
+    public string? ConflictOriginalPath { get; set; }
+    public int? ConflictOriginalVersion { get; set; }
 }
 
 public class PrepareVersionResponse

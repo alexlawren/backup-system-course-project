@@ -56,6 +56,37 @@
 .\stop-shared-demo.ps1
 ```
 
+#### Сценарий ручной демонстрации разрешения конфликтов:
+1. Запустить `.\start-shared-demo.ps1`;
+2. В веб-интерфейсе Клиента A (`http://localhost:5100`) создать общий набор `SharedConflictDemo` (`AccessMode = SHARED`);
+3. Скопировать `ShareCode` и в веб-интерфейсе Клиента B (`http://localhost:5200`) нажать «Подключиться к общему набору»;
+4. Клиент A создает в своей рабочей папке файл `conflict.txt` с содержимым `BASE`;
+5. Клиент B выполняет сверку и получает `conflict.txt` (`BASE`);
+6. В UI Клиента A нажать `[Остановить синхронизацию]` (имитация отключения клиента);
+7. В папке Клиента A отредактировать файл `conflict.txt`: `FROM CLIENT A`;
+8. В папке Клиента B отредактировать файл `conflict.txt`: `FROM CLIENT B`;
+9. Клиент B выполняет синхронизацию: на сервере фиксируется каноническая версия 2 (`FROM CLIENT B`);
+10. В UI Клиента A нажать `[Запустить синхронизацию]`:
+    - Движок обнаруживает расхождение версий (`divergence`);
+    - Локальная редакция Клиента A перемещается в физический файл `conflict (conflict CLIENT-A ...).txt`;
+    - Канонический файл `conflict.txt` заменяется версией сервера (`FROM CLIENT B`);
+    - Конфликтная копия отправляется на сервер как новый логический файл (версия 1);
+    - В таблице `change_logs` создается запись `CONFLICT_COPY` с `ActorClientId = Клиент A`;
+11. Клиент B при следующей сверке скачивает файл конфликтной копии;
+12. В интерфейсах обоих клиентов отображается статус **`Synced`** (синхронизировано), обе версии файла доступны всем участникам, потерь данных нет.
+
+---
+
+**SHARED STORAGE CHANGE-SET #3:** CONFLICT COPY RESOLUTION + FINAL SHARED STORAGE HARDENING + 267 TESTS GREEN
+- **Conflict Resolution Strategy:** «SERVER VERSION WINS CANONICAL PATH / LOCAL DIVERGENT VERSION BECOMES CONFLICT COPY». Никакой тихой перезаписи, никакого Last-Writer-Wins, никакого автоматического слияния текста (no content merge) — гарантированное сохранение обеих редакций;
+- **Deterministic Conflict Naming:** централизованный хелпер `ConflictFileNameHelper` формирует имя `{name} (conflict {MachineName} {yyyy-MM-dd HHmmss}){ext}` с очисткой спецсимволов ОС и суффиксами коллизий `(2)`, `(3)`;
+- **Failure Safety Ordering:** физическое сохранение расходящихся байт на диск **до** любой модификации канонического пути. При сетевом сбое отправки копия остается на диске и досылается при следующей сверке;
+- **Collision Handling:** автоматическое сохранение локальных версий для сценариев `Remote Modify + Local Modify`, `Server Delete + Local Modify`, `Remote Create Collision`, `Remote Rename Destination Occupied`, `Remote Rename Source Modified`;
+- **Multi-Client Convergence:** после разрешения конфликта статус реконсиляции обоих участников сходится к `Synced`, конфликтная копия доступна всем членам набора;
+- **Audit & Authorship:** новое протокольное действие `CONFLICT_COPY` в `ChangeLog` с точной фиксацией автора расходящейся редакции (`ActorClientId`);
+- **UI:** карточки активных и разрешенных конфликтов на главной странице, бейдж «Конфликтная копия» на странице файлов, цветовая индикация `CONFLICT_COPY` в журнале изменений;
+- **Тесты:** 267 автоматических тестов в зеленой зоне (250 baseline + 17 новых тестов генерации имен, идемпотентности, отказоустойчивости и E2E сценариев разрешения конфликтов).
+
 ---
 
 **SHARED STORAGE CHANGE-SET #2:** BIDIRECTIONAL SHARED SYNCHRONIZATION (SERVER → CLIENT) + 250 TESTS GREEN

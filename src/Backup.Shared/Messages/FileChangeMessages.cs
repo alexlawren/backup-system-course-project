@@ -3,7 +3,8 @@ namespace Backup.Shared.Messages;
 public enum BackupChangeOrigin
 {
     Normal,
-    Restore
+    Restore,
+    ConflictCopy
 }
 
 public class FileChangeRequest
@@ -14,6 +15,8 @@ public class FileChangeRequest
     public long Size { get; set; }
     public string Sha256 { get; set; } = string.Empty;
     public BackupChangeOrigin ChangeOrigin { get; set; } = BackupChangeOrigin.Normal;
+    public string? ConflictOriginalPath { get; set; }
+    public int? ConflictOriginalVersion { get; set; }
 }
 
 public class UploadRequiredResponse
