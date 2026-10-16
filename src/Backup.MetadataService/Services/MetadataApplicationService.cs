@@ -1008,4 +1008,50 @@ public class MetadataApplicationService : IMetadataApplicationService
             Success = true
         };
     }
+
+    public async Task<GetBackupSetManifestResponse> GetBackupSetManifestAsync(GetBackupSetManifestRequest request, CancellationToken cancellationToken = default)
+    {
+        await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new GetBackupSetManifestResponse
+            {
+                BackupSetId = request.BackupSetId,
+                Success = false,
+                ErrorCode = access.ErrorCode ?? "ACCESS_DENIED",
+                ErrorMessage = access.ErrorMessage
+            };
+        }
+
+        var entries = await dbContext.Files
+            .Where(f => f.BackupSetId == request.BackupSetId)
+            .OrderBy(f => f.RelativePath)
+            .Select(f => new BackupSetManifestEntryDto
+            {
+                FileId = f.Id,
+                RelativePath = f.RelativePath,
+                CurrentVersionNumber = f.CurrentVersionNumber,
+                IsDeleted = f.IsDeleted,
+                UpdatedAtUtc = f.UpdatedAtUtc,
+                Size = f.Versions
+                    .Where(v => v.VersionNumber == f.CurrentVersionNumber)
+                    .Select(v => v.Size)
+                    .FirstOrDefault(),
+                Sha256 = f.Versions
+                    .Where(v => v.VersionNumber == f.CurrentVersionNumber)
+                    .Select(v => v.Sha256)
+                    .FirstOrDefault() ?? string.Empty
+            })
+            .ToListAsync(cancellationToken);
+
+        return new GetBackupSetManifestResponse
+        {
+            BackupSetId = request.BackupSetId,
+            Success = true,
+            GeneratedAtUtc = DateTime.UtcNow,
+            Entries = entries
+        };
+    }
 }

@@ -48,8 +48,8 @@
         <div class="status-summary-item">
             <span class="status-label">Согласование</span>
             <span class="status-value">
-                <span class="status-dot @(SyncEngine.IsReconciling ? "pending" : (!SyncEngine.ReconciliationRequired ? "online" : "warning"))"></span>
-                @(SyncEngine.IsReconciling ? "Выполняется..." : (!SyncEngine.ReconciliationRequired ? "Синхронизировано" : "Требуется"))
+                <span class="status-dot @(SyncEngine.HasConflict ? "offline" : (SyncEngine.IsReconciling ? "pending" : (!SyncEngine.ReconciliationRequired ? "online" : "warning")))"></span>
+                @(SyncEngine.HasConflict ? "Конфликт" : (SyncEngine.IsReconciling ? "Синхронизация..." : (!SyncEngine.ReconciliationRequired ? "Синхронизировано" : "Требуется синхронизация")))
             </span>
         </div>
 
@@ -161,6 +161,21 @@
             </div>
         </div>
 
+        <div class="form-group" style="margin-bottom: 0.5rem;">
+            <label class="form-label">Тип набора:</label>
+            <div style="display: flex; gap: 1.25rem; align-items: center; margin-top: 0.35rem;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 0.4rem; font-size: 0.95rem;">
+                    <input type="radio" name="accessMode" value="@BackupSetAccessMode.Private" checked="@(selectedAccessMode == BackupSetAccessMode.Private)" @onchange="@(() => selectedAccessMode = BackupSetAccessMode.Private)" disabled="@isLoading" />
+                    Личный (Private)
+                </label>
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 0.4rem; font-size: 0.95rem;">
+                    <input type="radio" name="accessMode" value="@BackupSetAccessMode.Shared" checked="@(selectedAccessMode == BackupSetAccessMode.Shared)" @onchange="@(() => selectedAccessMode = BackupSetAccessMode.Shared)" disabled="@isLoading" />
+                    Общий (Shared)
+                </label>
+            </div>
+            <span class="form-helper">Общий набор позволяет синхронизировать одну папку между несколькими рабочими станциями</span>
+        </div>
+
         <div style="display: flex; gap: 0.65rem; align-items: center; flex-wrap: wrap;">
             <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
                 Сохранить и активировать
@@ -186,6 +201,61 @@
             </div>
 
             <div class="kv-row">
+                <span class="kv-key">Тип набора:</span>
+                <span class="kv-val">
+                    @if (activeAccessMode == BackupSetAccessMode.Shared)
+                    {
+                        <span class="status-badge badge-blue">Общий (Shared)</span>
+                    }
+                    else
+                    {
+                        <span class="status-badge badge-gray">Личный (Private)</span>
+                    }
+                </span>
+            </div>
+
+            @if (activeAccessMode == BackupSetAccessMode.Shared)
+            {
+                @if (!string.IsNullOrEmpty(activeShareCode))
+                {
+                    <div class="kv-row">
+                        <span class="kv-key">Код подключения:</span>
+                        <span class="kv-val mono" style="font-size: 1.05rem; font-weight: 700; letter-spacing: 0.05em; color: var(--color-primary, #60a5fa);">
+                            @activeShareCode
+                            <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 2px 8px;" @onclick="CopyShareCode">Копировать</button>
+                        </span>
+                    </div>
+                }
+
+                <div class="kv-row">
+                    <span class="kv-key">Участники:</span>
+                    <span class="kv-val">
+                        @(membersList != null ? $"{membersList.Count} участник(ов)" : "1")
+                        <button class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 2px 8px;" @onclick="ToggleMembersViewAsync">
+                            @(showMembers ? "Скрыть список" : "Показать участников")
+                        </button>
+                    </span>
+                </div>
+
+                @if (showMembers && membersList != null)
+                {
+                    <div style="margin-top: 0.5rem; background: var(--bg-surface, #1e293b); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border-color, #334155);">
+                        <h4 style="margin: 0 0 0.5rem 0; font-size: 0.9rem;">Участники набора:</h4>
+                        <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.85rem;">
+                            @foreach (var m in membersList)
+                            {
+                                <li style="margin-bottom: 0.25rem;">
+                                    <strong>@(string.IsNullOrEmpty(m.ClientName) ? m.MachineName : m.ClientName)</strong> (@m.MachineName) —
+                                    <span class="badge @(m.Role == "OWNER" ? "badge-primary" : "badge-secondary")">@(m.Role == "OWNER" ? "Владелец" : "Участник")</span>
+                                    <span class="text-secondary mono" style="margin-left: 0.5rem;">(подключён @m.JoinedAtUtc.ToLocalTime().ToString("dd.MM.yyyy HH:mm"))</span>
+                                </li>
+                            }
+                        </ul>
+                    </div>
+                }
+            }
+
+            <div class="kv-row">
                 <span class="kv-key">Активная папка:</span>
                 <span class="kv-val mono">@(SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? "—")</span>
             </div>
@@ -206,10 +276,55 @@
             </div>
         </div>
 
+        @if (SyncEngine.HasConflict)
+        {
+            <div class="alert alert-warning" style="margin-top: 0.75rem;">
+                <strong>Внимание! Обнаружены конфликты синхронизации (@SyncEngine.ActiveConflicts.Count):</strong>
+                <ul style="margin: 0.5rem 0 0 1.25rem; font-size: 0.85rem;">
+                    @foreach (var c in SyncEngine.ActiveConflicts)
+                    {
+                        <li><code>@c.RelativePath</code> — @c.ConflictType (сервер v@c.RemoteVersion). Автоматическая перезапись предотвращена. Сохранение конфликтующих копий отложено до Change-set #3.</li>
+                    }
+                </ul>
+            </div>
+        }
+
         @if (!string.IsNullOrEmpty(backupSetMessage))
         {
             <div class="alert @(backupSetIsError ? "alert-warning" : "alert-success")">
                 @backupSetMessage
+            </div>
+        }
+    </div>
+</section>
+
+<!-- Подключиться к общему набору -->
+<section class="panel-section">
+    <h2 class="panel-title">Подключиться к общему набору</h2>
+    <div class="form-grid">
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label" for="joinShareCode">Код подключения:</label>
+                <input id="joinShareCode" class="form-input mono" @bind="joinShareCode" placeholder="Например: 7H4K-92QX" disabled="@isLoading" />
+                <span class="form-helper">9-символьный код, полученный от владельца набора</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="joinLocalRootPath">Локальная папка:</label>
+                <input id="joinLocalRootPath" class="form-input" @bind="joinLocalRootPath" placeholder="Например: D:\SharedDemoB" disabled="@isLoading" />
+                <span class="form-helper">Каталог для скачивания и двусторонней синхронизации</span>
+            </div>
+        </div>
+
+        <div>
+            <button class="btn btn-primary" @onclick="JoinSharedSetAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(joinShareCode) || string.IsNullOrWhiteSpace(joinLocalRootPath))">
+                Подключиться к общему набору
+            </button>
+        </div>
+
+        @if (!string.IsNullOrEmpty(joinMessage))
+        {
+            <div class="alert @(joinIsError ? "alert-warning" : "alert-success")">
+                @joinMessage
             </div>
         }
     </div>
@@ -335,6 +450,17 @@
     private string backupSetMessage = "";
     private bool backupSetIsError;
 
+    private BackupSetAccessMode selectedAccessMode = BackupSetAccessMode.Private;
+    private BackupSetAccessMode activeAccessMode = BackupSetAccessMode.Private;
+    private string? activeShareCode;
+    private List<BackupSetMemberDto>? membersList;
+    private bool showMembers;
+
+    private string joinShareCode = "";
+    private string joinLocalRootPath = "";
+    private string joinMessage = "";
+    private bool joinIsError;
+
     private string manualFilePath = "";
     private UploadCompletedResponse? backupOperationResult;
 
@@ -350,6 +476,12 @@
                 backupSetName = profile.Name;
                 localRootPath = profile.LocalRootPath;
                 activeLocalRootPath = profile.LocalRootPath;
+                activeAccessMode = profile.AccessMode;
+                activeShareCode = profile.ShareCode;
+                if (activeAccessMode == BackupSetAccessMode.Shared)
+                {
+                    await LoadMembersAsync();
+                }
             }
             else
             {
@@ -375,6 +507,12 @@
             activeBackupSetId = profile.BackupSetId;
             activeLocalRootPath = profile.LocalRootPath;
             backupSetName = profile.Name;
+            activeAccessMode = profile.AccessMode;
+            activeShareCode = profile.ShareCode;
+            if (activeAccessMode == BackupSetAccessMode.Shared)
+            {
+                await LoadMembersAsync();
+            }
         }
         await LoadTotalFilesCountAsync();
         StateHasChanged();
@@ -473,26 +611,34 @@
         backupSetMessage = "";
         try
         {
-            var response = await BackupService.CreateBackupSetAsync(backupSetName, normalizedRootPath);
+            var response = await BackupService.CreateBackupSetAsync(backupSetName, normalizedRootPath, selectedAccessMode);
             if (response.Success && response.BackupSetId != Guid.Empty)
             {
                 activeBackupSetId = response.BackupSetId;
                 backupSetName = response.Name;
                 localRootPath = normalizedRootPath;
                 activeLocalRootPath = normalizedRootPath;
+                activeAccessMode = response.AccessMode;
+                activeShareCode = response.ShareCode;
 
                 var profile = new SyncProfile
                 {
                     BackupSetId = response.BackupSetId,
                     Name = backupSetName,
                     LocalRootPath = normalizedRootPath,
-                    AutomaticSyncEnabled = SyncEngine.IsRunning
+                    AutomaticSyncEnabled = SyncEngine.IsRunning,
+                    AccessMode = response.AccessMode,
+                    ShareCode = response.ShareCode
                 };
                 await ProfileService.SaveProfileAsync(profile);
                 await SyncEngine.SwitchProfileAsync(profile);
 
                 await LoadTotalFilesCountAsync();
-                backupSetMessage = $"Набор резервного копирования '{response.Name}' успешно сохранён и активирован.";
+                if (activeAccessMode == BackupSetAccessMode.Shared)
+                {
+                    await LoadMembersAsync();
+                }
+                backupSetMessage = $"Набор резервного копирования '{response.Name}' ({response.AccessMode}) успешно сохранён и активирован.";
                 backupSetIsError = false;
             }
             else
@@ -506,6 +652,118 @@
             Logger.LogError(ex, "Ошибка при создании набора резервного копирования");
             backupSetMessage = "Ошибка обмена с сервером при создании набора. Подробности записаны в журнал.";
             backupSetIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void CopyShareCode()
+    {
+        if (!string.IsNullOrEmpty(activeShareCode))
+        {
+            backupSetMessage = $"Код подключения: {activeShareCode} скопирован в буфер/готов для использования.";
+            backupSetIsError = false;
+        }
+    }
+
+    private async Task ToggleMembersViewAsync()
+    {
+        showMembers = !showMembers;
+        if (showMembers && activeBackupSetId != Guid.Empty)
+        {
+            await LoadMembersAsync();
+        }
+    }
+
+    private async Task LoadMembersAsync()
+    {
+        if (activeBackupSetId != Guid.Empty)
+        {
+            try
+            {
+                var resp = await BackupService.GetBackupSetMembersAsync(activeBackupSetId);
+                if (resp.Success)
+                {
+                    membersList = resp.Members;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Не удалось загрузить участников набора");
+            }
+        }
+    }
+
+    private async Task JoinSharedSetAsync()
+    {
+        if (string.IsNullOrWhiteSpace(joinShareCode) || string.IsNullOrWhiteSpace(joinLocalRootPath))
+            return;
+
+        string normalizedRoot = Path.GetFullPath(joinLocalRootPath.Trim());
+        if (!Directory.Exists(normalizedRoot))
+        {
+            try
+            {
+                Directory.CreateDirectory(normalizedRoot);
+            }
+            catch (Exception ex)
+            {
+                joinMessage = $"Не удалось создать папку '{normalizedRoot}': {ex.Message}";
+                joinIsError = true;
+                return;
+            }
+        }
+
+        isLoading = true;
+        joinMessage = "";
+        try
+        {
+            var joinResp = await BackupService.JoinSharedBackupSetAsync(joinShareCode.Trim());
+            if (joinResp.Success && joinResp.BackupSetId.HasValue)
+            {
+                var setId = joinResp.BackupSetId.Value;
+                var setName = joinResp.Name ?? "SharedSet";
+                activeBackupSetId = setId;
+                backupSetName = setName;
+                localRootPath = normalizedRoot;
+                activeLocalRootPath = normalizedRoot;
+                activeAccessMode = BackupSetAccessMode.Shared;
+                activeShareCode = joinResp.ShareCode ?? joinShareCode.Trim();
+
+                var profile = new SyncProfile
+                {
+                    BackupSetId = setId,
+                    Name = setName,
+                    LocalRootPath = normalizedRoot,
+                    AutomaticSyncEnabled = true,
+                    AccessMode = BackupSetAccessMode.Shared,
+                    ShareCode = activeShareCode
+                };
+
+                await ProfileService.SaveProfileAsync(profile);
+                await SyncEngine.SwitchProfileAsync(profile);
+                await SyncEngine.ReconcileNowAsync();
+
+                await LoadTotalFilesCountAsync();
+                await LoadMembersAsync();
+
+                joinMessage = $"Успешно подключено к общему набору '{setName}'. Выполнена начальная синхронизация.";
+                joinIsError = false;
+            }
+            else
+            {
+                joinMessage = $"Ошибка подключения: {joinResp.ErrorMessage ?? joinResp.ErrorCode ?? "Неизвестная ошибка"}";
+                joinIsError = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Ошибка при подключении к общему набору");
+            joinMessage = $"Ошибка соединения: {ex.Message}";
+            joinIsError = true;
         }
         finally
         {

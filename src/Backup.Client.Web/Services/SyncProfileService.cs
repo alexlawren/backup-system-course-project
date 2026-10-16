@@ -8,6 +8,8 @@ public class SyncProfile
     public string Name { get; set; } = string.Empty;
     public string LocalRootPath { get; set; } = string.Empty;
     public bool AutomaticSyncEnabled { get; set; }
+    public Backup.Shared.Messages.BackupSetAccessMode AccessMode { get; set; } = Backup.Shared.Messages.BackupSetAccessMode.Private;
+    public string? ShareCode { get; set; }
 }
 
 public interface ISyncProfileService

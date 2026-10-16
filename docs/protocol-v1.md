@@ -123,6 +123,11 @@
 - `JoinSharedBackupSetResult`: Результат присоединения (`Success`, `BackupSetId`, `Name`, `AccessMode`, `OwnerClientId`, `ShareCode`, `ErrorCode`, `ErrorMessage`).
 - `GetBackupSetMembers`: Запрос списка участников набора резервного копирования (`BackupSetId`).
 - `GetBackupSetMembersResult`: Список участников с их ролями (`BackupSetId`, `Members: List<BackupSetMemberDto>`, `Success`, `ErrorCode`, `ErrorMessage`).
+- `GetBackupSetManifest`: Запрос серверного манифеста состояния набора (`BackupSetId`).
+- `GetBackupSetManifestResult`: Ответ с манифестом файлов набора (`BackupSetId`, `Entries: List<BackupSetManifestEntryDto>`, `GeneratedAtUtc`, `Success`, `ErrorCode`, `ErrorMessage`).
+- `DownloadFileVersion`: Запрос на потоковое скачивание конкретной ревизии файла (`BackupSetId`, `FileId`, `VersionNumber`).
+- `DownloadFileVersionReady`: Дескриптор готовности сервера перед передачей бинарного потока (`Success`, `FileId`, `VersionNumber`, `RelativePath`, `Size`, `Sha256`, `ErrorCode`, `ErrorMessage`).
+- `DownloadFileVersionData`: Бинарный поток байт ревизии файла (`BodyLength = Size`, `ContentType = application/octet-stream`).
 
 ---
 
@@ -664,3 +669,74 @@ Client (Web)                     SyncGateway                 MetadataService    
     "errorMessage": null
   }
   ```
+
+### 10.3. Получение серверного манифеста (`GetBackupSetManifest`)
+- **Запрос (`GetBackupSetManifestRequest`):**
+  ```json
+  {
+    "backupSetId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  }
+  ```
+  *Примечание:* Поле `clientId` из DTO не используется для авторизации; шлюз авторизует сессию исключительно по `GatewaySession.ClientId`.
+
+- **Ответ (`GetBackupSetManifestResponse`):**
+  ```json
+  {
+    "backupSetId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "generatedAtUtc": "2026-10-16T10:40:00Z",
+    "entries": [
+      {
+        "fileId": "612b9add-00b8-497f-b318-1053cc554c4d",
+        "relativePath": "docs/report.txt",
+        "currentVersionNumber": 2,
+        "isDeleted": false,
+        "size": 1024,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "updatedAtUtc": "2026-10-16T10:35:00Z"
+      },
+      {
+        "fileId": "8f4a21cd-43a9-467f-98c1-1253bb554e12",
+        "relativePath": "old_draft.txt",
+        "currentVersionNumber": 1,
+        "isDeleted": true,
+        "size": 512,
+        "sha256": "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e",
+        "updatedAtUtc": "2026-10-16T10:30:00Z"
+      }
+    ],
+    "success": true,
+    "errorCode": null,
+    "errorMessage": null
+  }
+  ```
+
+### 10.4. Потоковое скачивание версии файла (`DownloadFileVersion`)
+Read-only потоковый конвейер скачивания существующей ревизии файла (не затрагивает бизнес-логику Restore и не порождает новых записей аудита):
+
+1. **Запрос дескриптора (`DownloadFileVersionRequest`):**
+   ```json
+   {
+     "backupSetId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+     "fileId": "612b9add-00b8-497f-b318-1053cc554c4d",
+     "versionNumber": 2
+   }
+   ```
+2. **Ответ готовности (`DownloadFileVersionReadyResponse`):**
+   ```json
+   {
+     "success": true,
+     "fileId": "612b9add-00b8-497f-b318-1053cc554c4d",
+     "versionNumber": 2,
+     "relativePath": "docs/report.txt",
+     "size": 1024,
+     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "errorCode": null,
+     "errorMessage": null
+   }
+   ```
+3. **Бинарный фрейм полезной нагрузки (`DownloadFileVersionData`):**
+   - `Header.MessageType`: `DownloadFileVersionData`
+   - `Header.ContentType`: `application/octet-stream`
+   - `Header.BodyLength`: `1024`
+   - `Body`: Сквозной бинарный поток байт файла из хранилища.

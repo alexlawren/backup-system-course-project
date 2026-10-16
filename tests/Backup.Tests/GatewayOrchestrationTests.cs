@@ -857,6 +857,15 @@ internal class FakeMetadataServiceClient : IMetadataServiceClient
             : Task.FromResult(new GetBackupSetMembersResponse { Success = true, BackupSetId = request.BackupSetId });
     }
 
+    public Func<GetBackupSetManifestRequest, Task<GetBackupSetManifestResponse>>? GetBackupSetManifestFunc { get; set; }
+
+    public Task<GetBackupSetManifestResponse> GetBackupSetManifestAsync(GetBackupSetManifestRequest request, CancellationToken cancellationToken = default)
+    {
+        return GetBackupSetManifestFunc != null
+            ? GetBackupSetManifestFunc(request)
+            : Task.FromResult(new GetBackupSetManifestResponse { Success = true, BackupSetId = request.BackupSetId });
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 

@@ -127,6 +127,14 @@ public class GatewaySessionHandler : IAsyncDisposable
                 await HandleGetBackupSetMembersAsync(stream, header, cancellationToken);
                 break;
 
+            case MessageType.GetBackupSetManifest:
+                await HandleGetBackupSetManifestAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.DownloadFileVersion:
+                await HandleDownloadFileVersionAsync(stream, header, cancellationToken);
+                break;
+
             default:
                 _logger.LogWarning("[SyncGateway] Unhandled MessageType: {MessageType}", header.MessageType);
                 if (header.BodyLength > 0)
@@ -1112,6 +1120,209 @@ public class GatewaySessionHandler : IAsyncDisposable
             await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetMembersResult,
                 new GetBackupSetMembersResponse { Success = false, ErrorCode = BackupErrorCodes.MetadataUnavailable, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleGetBackupSetManifestAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<GetBackupSetManifestRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetManifestResult,
+                new GetBackupSetManifestResponse { Success = false, ErrorCode = BackupErrorCodes.InvalidInput, ErrorMessage = "Request body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        // Authoritative ClientId from session
+        if (_session.ClientId.HasValue)
+        {
+            request.ClientId = _session.ClientId.Value;
+        }
+
+        if (request.BackupSetId == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetManifestResult,
+                new GetBackupSetManifestResponse { Success = false, ErrorCode = BackupErrorCodes.InvalidInput, ErrorMessage = "BackupSetId cannot be empty." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var result = await _metadataClient.GetBackupSetManifestAsync(request, cancellationToken);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetManifestResult, result, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to get backup set manifest from MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetManifestResult,
+                new GetBackupSetManifestResponse { Success = false, ErrorCode = BackupErrorCodes.MetadataUnavailable, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleDownloadFileVersionAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<DownloadFileVersionRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse { Success = false, ErrorCode = BackupErrorCodes.InvalidInput, ErrorMessage = "DownloadFileVersionRequest body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        // ClientId validation
+        if (_session.ClientId.HasValue && request.ClientId.HasValue && request.ClientId.Value != _session.ClientId.Value)
+        {
+            _logger.LogWarning("[SyncGateway] Download rejected: ClientId {ReqClientId} does not match active session ClientId {SessionClientId}",
+                request.ClientId, _session.ClientId.Value);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse { Success = false, ErrorCode = BackupErrorCodes.AccessDenied, ErrorMessage = "ClientId does not match active session." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        var actorClientId = _session.ClientId ?? request.ClientId;
+
+        if (request.BackupSetId == Guid.Empty || request.FileId == Guid.Empty || request.VersionNumber <= 0)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse { Success = false, ErrorCode = BackupErrorCodes.InvalidInput, ErrorMessage = "Invalid BackupSetId, FileId or VersionNumber." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        // 1. Resolve version from MetadataService (enforces access control for BackupSet and ClientId)
+        ResolveVersionResponse resolveResp;
+        try
+        {
+            resolveResp = await _metadataClient.ResolveVersionAsync(new ResolveVersionRequest
+            {
+                FileId = request.FileId,
+                VersionNumber = request.VersionNumber,
+                ClientId = actorClientId
+            }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] ResolveVersion failed in MetadataService during DownloadFileVersion");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse { Success = false, ErrorCode = BackupErrorCodes.MetadataUnavailable, ErrorMessage = $"MetadataService error: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (!resolveResp.Success || resolveResp.Version == null)
+        {
+            _logger.LogWarning("[SyncGateway] DownloadFileVersion resolution failed: {ErrorCode} - {ErrorMessage}", resolveResp.ErrorCode, resolveResp.ErrorMessage);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse
+                {
+                    BackupSetId = request.BackupSetId,
+                    FileId = request.FileId,
+                    VersionNumber = request.VersionNumber,
+                    Success = false,
+                    ErrorCode = resolveResp.ErrorCode ?? "VERSION_NOT_FOUND",
+                    ErrorMessage = resolveResp.ErrorMessage ?? $"Version {request.VersionNumber} not found."
+                },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        // Cross-BackupSet check: verify that the resolved file belongs to the requested BackupSetId
+        if (resolveResp.BackupSetId != request.BackupSetId)
+        {
+            _logger.LogWarning("[SyncGateway] Download rejected: file {FileId} belongs to set {ActualSet}, not requested set {ReqSet}",
+                request.FileId, resolveResp.BackupSetId, request.BackupSetId);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse
+                {
+                    BackupSetId = request.BackupSetId,
+                    FileId = request.FileId,
+                    VersionNumber = request.VersionNumber,
+                    Success = false,
+                    ErrorCode = BackupErrorCodes.AccessDenied,
+                    ErrorMessage = "File does not belong to specified BackupSet."
+                },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(resolveResp.Version.StorageKey))
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady,
+                new DownloadFileVersionReadyResponse
+                {
+                    BackupSetId = request.BackupSetId,
+                    FileId = request.FileId,
+                    VersionNumber = request.VersionNumber,
+                    Success = false,
+                    ErrorCode = "STORAGE_KEY_MISSING",
+                    ErrorMessage = $"StorageKey missing for version {request.VersionNumber}."
+                },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        _logger.LogInformation("[DownloadFileVersion] Streaming version {Version} of file '{Path}' to client {ClientId} (StorageKey: {StorageKey})",
+            request.VersionNumber, resolveResp.RelativePath, actorClientId, resolveResp.Version.StorageKey);
+
+        // 2. Stream from StorageService to Client via direct bounded streaming
+        try
+        {
+            var getResult = await _storageClient.StreamStoredFileAsync(
+                new GetStoredFileRequest { StorageKey = resolveResp.Version.StorageKey },
+                async (storageResult) =>
+                {
+                    // 2a. Send DownloadFileVersionReady descriptor frame
+                    var ready = new DownloadFileVersionReadyResponse
+                    {
+                        BackupSetId = request.BackupSetId,
+                        FileId = resolveResp.FileId,
+                        RelativePath = resolveResp.RelativePath,
+                        VersionNumber = resolveResp.Version.VersionNumber,
+                        Size = storageResult.Size,
+                        Sha256 = storageResult.Sha256 ?? resolveResp.Version.Sha256,
+                        Success = true
+                    };
+                    await _writer.WriteJsonFrameAsync(stream, MessageType.DownloadFileVersionReady, ready, correlationId: header.MessageId, cancellationToken: cancellationToken);
+
+                    // 2b. Write DownloadFileVersionData binary header frame
+                    var dataHeader = new ProtocolHeader
+                    {
+                        Magic = ProtocolConstants.Magic,
+                        ProtocolVersion = ProtocolConstants.Version,
+                        MessageType = MessageType.DownloadFileVersionData,
+                        MessageId = Guid.NewGuid(),
+                        CorrelationId = header.MessageId,
+                        ContentType = ProtocolContentTypes.ApplicationOctetStream,
+                        BodyLength = storageResult.Size,
+                        SentAtUtc = DateTime.UtcNow
+                    };
+                    await _writer.WriteHeaderAsync(stream, dataHeader, cancellationToken);
+
+                    // Relay stream directly into client stream
+                    return stream;
+                },
+                cancellationToken);
+
+            if (!getResult.Success)
+            {
+                _logger.LogWarning("[SyncGateway] StorageService download failed: {ErrorCode} - {ErrorMessage}", getResult.ErrorCode, getResult.ErrorMessage);
+            }
+            else
+            {
+                _logger.LogInformation("[DownloadFileVersion] Streamed version {Version} of '{Path}' to client successfully ({Size} bytes)",
+                    request.VersionNumber, resolveResp.RelativePath, getResult.Size);
+            }
+            await stream.FlushAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Stream failure during DownloadFileVersion for '{Path}'", resolveResp.RelativePath);
+            throw;
         }
     }
 

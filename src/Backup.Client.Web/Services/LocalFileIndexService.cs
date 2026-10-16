@@ -8,6 +8,12 @@ public class LocalFileIndexEntry
     public long Size { get; set; }
     public DateTime LastWriteTimeUtc { get; set; }
     public string Sha256 { get; set; } = string.Empty;
+
+    // Change-set #2: Server state last synced with local file
+    public Guid? FileId { get; set; }
+    public int LastSyncedServerVersion { get; set; }
+    public string? LastSyncedSha256 { get; set; }
+    public bool IsDeletedOnServer { get; set; }
 }
 
 public class LocalFileIndex

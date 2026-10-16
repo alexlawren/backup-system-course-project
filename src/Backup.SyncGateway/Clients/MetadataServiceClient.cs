@@ -176,6 +176,15 @@ public class MetadataServiceClient : IMetadataServiceClient
             cancellationToken);
     }
 
+    public async Task<GetBackupSetManifestResponse> GetBackupSetManifestAsync(GetBackupSetManifestRequest request, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<GetBackupSetManifestRequest, GetBackupSetManifestResponse>(
+            MessageType.GetBackupSetManifest,
+            MessageType.GetBackupSetManifestResult,
+            request,
+            cancellationToken);
+    }
+
     private async Task<TResponse> SendRequestAsync<TRequest, TResponse>(
         MessageType requestType,
         MessageType expectedResponseType,

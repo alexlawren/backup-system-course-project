@@ -42,3 +42,67 @@ public class GetBackupSetMembersResponse
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
 }
+
+public class GetBackupSetManifestRequest
+{
+    public Guid BackupSetId { get; set; }
+    public Guid? ClientId { get; set; }
+}
+
+public class BackupSetManifestEntryDto
+{
+    public Guid FileId { get; set; }
+    public string RelativePath { get; set; } = string.Empty;
+    public int CurrentVersionNumber { get; set; }
+    public bool IsDeleted { get; set; }
+    public long Size { get; set; }
+    public string Sha256 { get; set; } = string.Empty;
+    public DateTime UpdatedAtUtc { get; set; }
+    public Guid? LastActorClientId { get; set; }
+    public string? LastActorClientName { get; set; }
+}
+
+public class GetBackupSetManifestResponse
+{
+    public bool Success { get; set; } = true;
+    public Guid BackupSetId { get; set; }
+    public DateTime GeneratedAtUtc { get; set; } = DateTime.UtcNow;
+    public List<BackupSetManifestEntryDto> Entries { get; set; } = new();
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class DownloadFileVersionRequest
+{
+    public Guid BackupSetId { get; set; }
+    public Guid FileId { get; set; }
+    public int VersionNumber { get; set; }
+    public Guid? ClientId { get; set; }
+}
+
+public class DownloadFileVersionReadyResponse
+{
+    public bool Success { get; set; } = true;
+    public Guid BackupSetId { get; set; }
+    public Guid FileId { get; set; }
+    public int VersionNumber { get; set; }
+    public string RelativePath { get; set; } = string.Empty;
+    public long Size { get; set; }
+    public string Sha256 { get; set; } = string.Empty;
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class SharedFileDownloadResult
+{
+    public bool Success { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+    public string TempFilePath { get; set; } = string.Empty;
+    public string TargetFilePath { get; set; } = string.Empty;
+    public string RelativePath { get; set; } = string.Empty;
+    public long Size { get; set; }
+    public string Sha256 { get; set; } = string.Empty;
+    public int VersionNumber { get; set; }
+    public Guid FileId { get; set; }
+}

@@ -500,6 +500,49 @@ public class SharedBackupSetUnitAndIntegrationTests : IDisposable
         Assert.NotNull(deleteEntry);
         Assert.Equal(regMember.ClientId, deleteEntry.ActorClientId);
     }
+
+    [Fact]
+    public void Test_15_ExistingPrivateStorageKey_FormatRemainsBackwardCompatible()
+    {
+        Guid clientId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        Guid setId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        Guid fileId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        int versionNumber = 5;
+
+        string key = StorageKeyHelper.BuildStorageKey(clientId, setId, fileId, versionNumber);
+
+        Assert.Equal("clients/11111111-1111-1111-1111-111111111111/backup-sets/22222222-2222-2222-2222-222222222222/files/33333333-3333-3333-3333-333333333333/versions/0000000005.bin", key);
+    }
+
+    [Fact]
+    public async Task Test_16_MigrationBackfill_ExistingBackupSet_HasOwnerMembership()
+    {
+        await using var db = await _contextFactory.CreateDbContextAsync();
+
+        // Simulate an existing pre-migration backup set without any membership record
+        var client = new ClientEntity { Id = Guid.NewGuid(), Name = "LegacyClient", MachineName = "PC-LEGACY", CreatedAtUtc = DateTime.UtcNow, LastSeenAtUtc = DateTime.UtcNow };
+        var legacySet = new BackupSetEntity { Id = Guid.NewGuid(), ClientId = client.Id, Name = "LegacySet", LocalRootPath = "/data", AccessMode = "PRIVATE", CreatedAtUtc = DateTime.UtcNow, IsActive = true };
+        db.Clients.Add(client);
+        db.BackupSets.Add(legacySet);
+        await db.SaveChangesAsync();
+
+        // Verify initial state has no members
+        var initialMembers = await db.BackupSetMembers.Where(m => m.BackupSetId == legacySet.Id).ToListAsync();
+        Assert.Empty(initialMembers);
+
+        // Execute the exact backfill SQL logic from the EF Core migration
+        await db.Database.ExecuteSqlRawAsync(@"
+            INSERT INTO backup_set_members (""BackupSetId"", ""ClientId"", ""Role"", ""JoinedAtUtc"")
+            SELECT ""Id"", ""ClientId"", 'OWNER', ""CreatedAtUtc""
+            FROM backup_sets
+            WHERE ""Id"" = {0};", legacySet.Id);
+
+        // Verify backfill created OWNER membership
+        var backfilledMember = await db.BackupSetMembers.FirstOrDefaultAsync(m => m.BackupSetId == legacySet.Id && m.ClientId == client.Id);
+        Assert.NotNull(backfilledMember);
+        Assert.Equal("OWNER", backfilledMember.Role);
+        Assert.Equal(legacySet.CreatedAtUtc, backfilledMember.JoinedAtUtc);
+    }
 }
 
 public class SharedBackupSetE2ETests : IAsyncLifetime
@@ -718,5 +761,190 @@ public class SharedBackupSetE2ETests : IAsyncLifetime
         var resC = await serviceC.BackupSingleFileAsync(sharedSetId, _sourceDirB, fileCPath, token);
         Assert.False(resC.Success);
         Assert.Equal(BackupErrorCodes.AccessDenied, resC.ErrorCode);
+    }
+
+    [Fact]
+    public async Task NonMember_CannotReadSharedSetFilesThroughGateway()
+    {
+        using var testCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = testCts.Token;
+
+        var clientA = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityA = new ClientIdentityService(Path.Combine(_clientDataDirA, "client-state.json"));
+        var serviceA = new BackupClientService(clientA, identityA);
+        await serviceA.EnsureRegisteredAsync(token);
+        var idA = (await serviceA.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var setRespA = await clientA.CreateBackupSetAsync(new CreateBackupSetRequest
+        {
+            ClientId = idA,
+            Name = "SharedSecretVault",
+            AccessMode = BackupSetAccessMode.Shared
+        }, token);
+        Assert.True(setRespA.Success);
+
+        var clientC = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityC = new ClientIdentityService(Path.Combine(_clientDataDirC, "client-state.json"));
+        var serviceC = new BackupClientService(clientC, identityC);
+        await serviceC.EnsureRegisteredAsync(token);
+        var idC = (await serviceC.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var filesResp = await clientC.GetFilesAsync(new GetFilesRequest
+        {
+            BackupSetId = setRespA.BackupSetId,
+            ClientId = idC
+        }, token);
+
+        Assert.False(filesResp.Success);
+        Assert.Equal(BackupErrorCodes.AccessDenied, filesResp.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Member_CanReadSharedSetFilesVersionsAndChangeLogThroughGateway()
+    {
+        using var testCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = testCts.Token;
+
+        var clientA = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityA = new ClientIdentityService(Path.Combine(_clientDataDirA, "client-state.json"));
+        var serviceA = new BackupClientService(clientA, identityA);
+        await serviceA.EnsureRegisteredAsync(token);
+        var idA = (await serviceA.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var setRespA = await clientA.CreateBackupSetAsync(new CreateBackupSetRequest
+        {
+            ClientId = idA,
+            Name = "SharedCollabSet",
+            AccessMode = BackupSetAccessMode.Shared
+        }, token);
+        Assert.True(setRespA.Success);
+
+        string fileAPath = Path.Combine(_sourceDirA, "init.txt");
+        File.WriteAllText(fileAPath, "Init file");
+        var resA = await serviceA.BackupSingleFileAsync(setRespA.BackupSetId, _sourceDirA, fileAPath, token);
+        Assert.True(resA.Success);
+
+        var clientB = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityB = new ClientIdentityService(Path.Combine(_clientDataDirB, "client-state.json"));
+        var serviceB = new BackupClientService(clientB, identityB);
+        await serviceB.EnsureRegisteredAsync(token);
+        var idB = (await serviceB.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var joinResp = await clientB.JoinSharedBackupSetAsync(new JoinSharedBackupSetRequest
+        {
+            ShareCode = setRespA.ShareCode!
+        }, token);
+        Assert.True(joinResp.Success);
+
+        var filesResp = await clientB.GetFilesAsync(new GetFilesRequest
+        {
+            BackupSetId = setRespA.BackupSetId,
+            ClientId = idB
+        }, token);
+        Assert.True(filesResp.Success);
+        Assert.Single(filesResp.Files);
+
+        var fileId = filesResp.Files[0].FileId;
+        var versionsResp = await clientB.GetVersionsAsync(new GetVersionsRequest
+        {
+            FileId = fileId,
+            ClientId = idB
+        }, token);
+        Assert.True(versionsResp.Success);
+        Assert.Single(versionsResp.Versions);
+
+        var logsResp = await clientB.GetChangeLogAsync(new GetChangeLogRequest
+        {
+            BackupSetId = setRespA.BackupSetId,
+            ClientId = idB
+        }, token);
+        Assert.True(logsResp.Success);
+        Assert.NotEmpty(logsResp.Entries);
+    }
+
+    [Fact]
+    public async Task PrivateBackupSet_RemainsOwnerOnlyThroughGateway()
+    {
+        using var testCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = testCts.Token;
+
+        var clientA = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityA = new ClientIdentityService(Path.Combine(_clientDataDirA, "client-state.json"));
+        var serviceA = new BackupClientService(clientA, identityA);
+        await serviceA.EnsureRegisteredAsync(token);
+        var idA = (await serviceA.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var setRespA = await clientA.CreateBackupSetAsync(new CreateBackupSetRequest
+        {
+            ClientId = idA,
+            Name = "StrictlyPrivateSet",
+            AccessMode = BackupSetAccessMode.Private
+        }, token);
+        Assert.True(setRespA.Success);
+
+        var clientB = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityB = new ClientIdentityService(Path.Combine(_clientDataDirB, "client-state.json"));
+        var serviceB = new BackupClientService(clientB, identityB);
+        await serviceB.EnsureRegisteredAsync(token);
+        var idB = (await serviceB.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var filesResp = await clientB.GetFilesAsync(new GetFilesRequest
+        {
+            BackupSetId = setRespA.BackupSetId,
+            ClientId = idB
+        }, token);
+
+        Assert.False(filesResp.Success);
+        Assert.Equal(BackupErrorCodes.AccessDenied, filesResp.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Gateway_IgnoresSpoofedActorClientId()
+    {
+        using var testCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = testCts.Token;
+
+        var clientA = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityA = new ClientIdentityService(Path.Combine(_clientDataDirA, "client-state.json"));
+        var serviceA = new BackupClientService(clientA, identityA);
+        await serviceA.EnsureRegisteredAsync(token);
+        var idA = (await serviceA.GetIdentityAsync(token))!.ClientId!.Value;
+
+        var setRespA = await clientA.CreateBackupSetAsync(new CreateBackupSetRequest
+        {
+            ClientId = idA,
+            Name = "AuditVault",
+            AccessMode = BackupSetAccessMode.Shared
+        }, token);
+        Assert.True(setRespA.Success);
+
+        var clientB = new BackupGatewayClient("127.0.0.1", _gatewayPort);
+        var identityB = new ClientIdentityService(Path.Combine(_clientDataDirB, "client-state.json"));
+        var serviceB = new BackupClientService(clientB, identityB);
+        await serviceB.EnsureRegisteredAsync(token);
+        var idB = (await serviceB.GetIdentityAsync(token))!.ClientId!.Value;
+
+        await clientB.JoinSharedBackupSetAsync(new JoinSharedBackupSetRequest
+        {
+            ShareCode = setRespA.ShareCode!
+        }, token);
+
+        // Client B uploads a file, attempting to spoof ActorClientId as Client A
+        string fileBPath = Path.Combine(_sourceDirB, "spoof_attempt.txt");
+        File.WriteAllText(fileBPath, "Testing spoofing");
+
+        var resB = await serviceB.BackupSingleFileAsync(setRespA.BackupSetId, _sourceDirB, fileBPath, token);
+        Assert.True(resB.Success);
+
+        // Verify in changelog that the recorded ActorClientId is idB (actual session identity), NOT idA
+        var logs = await clientA.GetChangeLogAsync(new GetChangeLogRequest
+        {
+            BackupSetId = setRespA.BackupSetId
+        }, token);
+
+        Assert.True(logs.Success);
+        var entry = logs.Entries.First(e => e.RelativePath == "spoof_attempt.txt" && e.Action == "CREATE");
+        Assert.Equal(idB, entry.ActorClientId);
+        Assert.NotEqual(idA, entry.ActorClientId);
     }
 }

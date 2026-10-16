@@ -844,6 +844,245 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         }
     }
 
+    public async Task<GetBackupSetManifestResponse> GetBackupSetManifestAsync(
+        GetBackupSetManifestRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _connectionLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureConnectedAsync(cancellationToken);
+
+            await _writer.WriteJsonFrameAsync(_stream!, MessageType.GetBackupSetManifest, request, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+            if (respHeader == null)
+            {
+                MarkDisconnected();
+                throw new ProtocolException("Remote host closed TCP connection.");
+            }
+
+            if (respHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+                return new GetBackupSetManifestResponse { Success = false, ErrorCode = err?.Code ?? "ERROR", ErrorMessage = err?.Message ?? "Failed to get manifest." };
+            }
+
+            if (respHeader.MessageType != MessageType.GetBackupSetManifestResult)
+            {
+                throw new ProtocolException($"Expected GetBackupSetManifestResult, received '{respHeader.MessageType}'.");
+            }
+
+            var result = await _reader.ReadJsonBodyAsync<GetBackupSetManifestResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+            return result ?? new GetBackupSetManifestResponse { Success = false, ErrorMessage = "Empty GetBackupSetManifestResult received." };
+        }
+        catch (Exception)
+        {
+            MarkDisconnected();
+            throw;
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
+    }
+
+    public async Task<SharedFileDownloadResult> DownloadSharedFileVersionAsync(
+        DownloadFileVersionRequest request,
+        string localRootPath,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(localRootPath) || !Directory.Exists(localRootPath))
+        {
+            return new SharedFileDownloadResult
+            {
+                Success = false,
+                ErrorCode = "INVALID_ROOT_PATH",
+                ErrorMessage = $"Local root path '{localRootPath}' does not exist."
+            };
+        }
+
+        await _connectionLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureConnectedAsync(cancellationToken);
+
+            // 1. Send DownloadFileVersion request
+            await _writer.WriteJsonFrameAsync(_stream!, MessageType.DownloadFileVersion, request, cancellationToken: cancellationToken);
+
+            // 2. Receive DownloadFileVersionReady descriptor
+            var readyHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (readyHeader == null)
+            {
+                MarkDisconnected();
+                throw new ProtocolException("Remote host closed TCP connection before sending DownloadFileVersionReady.");
+            }
+
+            if (readyHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, readyHeader.BodyLength, cancellationToken);
+                return new SharedFileDownloadResult
+                {
+                    Success = false,
+                    ErrorCode = err?.Code ?? "ERROR",
+                    ErrorMessage = err?.Message ?? "Download rejected by server."
+                };
+            }
+
+            if (readyHeader.MessageType != MessageType.DownloadFileVersionReady)
+            {
+                throw new ProtocolException($"Expected DownloadFileVersionReady, received '{readyHeader.MessageType}'.");
+            }
+
+            var ready = await _reader.ReadJsonBodyAsync<DownloadFileVersionReadyResponse>(_stream!, readyHeader.BodyLength, cancellationToken);
+            if (ready == null || !ready.Success)
+            {
+                return new SharedFileDownloadResult
+                {
+                    Success = false,
+                    ErrorCode = ready?.ErrorCode ?? "DOWNLOAD_FAILED",
+                    ErrorMessage = ready?.ErrorMessage ?? "DownloadFileVersionReady descriptor indicated failure."
+                };
+            }
+
+            // 3. Receive DownloadFileVersionData binary header
+            var fileHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+            if (fileHeader == null)
+            {
+                MarkDisconnected();
+                throw new ProtocolException("Remote host closed TCP connection before sending DownloadFileVersionData payload.");
+            }
+
+            if (fileHeader.MessageType != MessageType.DownloadFileVersionData)
+            {
+                throw new ProtocolException($"Expected DownloadFileVersionData binary frame, received '{fileHeader.MessageType}'.");
+            }
+
+            if (fileHeader.BodyLength != ready.Size)
+            {
+                throw new ProtocolException($"Body length mismatch: header has {fileHeader.BodyLength}, ready descriptor has {ready.Size}.");
+            }
+
+            // 4. Validate target path safety
+            if (!ProtocolPathValidator.TryNormalizeAndValidate(ready.RelativePath, out var normalizedRelative, out var pathErr))
+            {
+                await DrainRemainingAsync(_stream!, fileHeader.BodyLength, cancellationToken);
+                return new SharedFileDownloadResult
+                {
+                    Success = false,
+                    ErrorCode = BackupErrorCodes.InvalidRelativePath,
+                    ErrorMessage = $"Server returned invalid relative path: {pathErr}"
+                };
+            }
+
+            string fullRoot = Path.GetFullPath(localRootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string targetFullPath = Path.GetFullPath(Path.Combine(localRootPath, normalizedRelative));
+
+            if (!targetFullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                await DrainRemainingAsync(_stream!, fileHeader.BodyLength, cancellationToken);
+                return new SharedFileDownloadResult
+                {
+                    Success = false,
+                    ErrorCode = BackupErrorCodes.InvalidRelativePath,
+                    ErrorMessage = $"Security violation: Download path '{targetFullPath}' escapes BackupSet root '{fullRoot}'."
+                };
+            }
+
+            // 5. Ensure parent directories exist
+            string? targetDir = Path.GetDirectoryName(targetFullPath);
+            if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
+            {
+                Directory.CreateDirectory(targetDir);
+            }
+
+            // 6. Write to temporary file in the same directory while calculating SHA-256
+            string tempPath = Path.Combine(targetDir!, $"{Path.GetFileName(targetFullPath)}.sharedsync.{Guid.NewGuid():N}.tmp");
+            string actualSha256;
+            long actualSize = 0;
+
+            try
+            {
+                using (var fileStream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, useAsync: true))
+                using (var sha256 = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256))
+                {
+                    byte[] buffer = new byte[65536];
+                    long remaining = ready.Size;
+                    while (remaining > 0)
+                    {
+                        int toRead = (int)Math.Min(buffer.Length, remaining);
+                        int read = await _stream!.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken);
+                        if (read == 0)
+                        {
+                            throw new ProtocolException($"Unexpected end of stream while streaming download payload. Remaining: {remaining} bytes.");
+                        }
+
+                        await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                        sha256.AppendData(buffer, 0, read);
+                        actualSize += read;
+                        remaining -= read;
+                    }
+
+                    await fileStream.FlushAsync(cancellationToken);
+                    actualSha256 = Convert.ToHexStringLower(sha256.GetHashAndReset());
+                }
+
+                // 7. Validate size and hash
+                if (actualSize != ready.Size)
+                {
+                    if (File.Exists(tempPath)) File.Delete(tempPath);
+                    return new SharedFileDownloadResult
+                    {
+                        Success = false,
+                        ErrorCode = BackupErrorCodes.SizeMismatch,
+                        ErrorMessage = $"Size mismatch: expected {ready.Size}, received {actualSize}"
+                    };
+                }
+
+                if (!string.Equals(actualSha256, ready.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (File.Exists(tempPath)) File.Delete(tempPath);
+                    return new SharedFileDownloadResult
+                    {
+                        Success = false,
+                        ErrorCode = BackupErrorCodes.HashMismatch,
+                        ErrorMessage = $"SHA-256 mismatch: expected {ready.Sha256}, calculated {actualSha256}"
+                    };
+                }
+
+                return new SharedFileDownloadResult
+                {
+                    Success = true,
+                    TempFilePath = tempPath,
+                    TargetFilePath = targetFullPath,
+                    RelativePath = normalizedRelative,
+                    Size = actualSize,
+                    Sha256 = actualSha256,
+                    VersionNumber = ready.VersionNumber,
+                    FileId = ready.FileId
+                };
+            }
+            catch (Exception ex)
+            {
+                MarkDisconnected();
+                if (File.Exists(tempPath))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
+                return new SharedFileDownloadResult
+                {
+                    Success = false,
+                    ErrorCode = "DOWNLOAD_STREAM_ERROR",
+                    ErrorMessage = $"Stream transfer error: {ex.Message}"
+                };
+            }
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
+    }
+
     public async Task<RestoreDownloadResult> DownloadAndVerifyRestoreFileAsync(
         RestoreRequest request,
         string localRootPath,

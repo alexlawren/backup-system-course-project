@@ -26,12 +26,26 @@ public interface ISyncEngine : IAsyncDisposable, IDisposable
     string? LastSyncResult { get; }
     int PendingEventCount { get; }
     IReadOnlyList<SyncLogEntry> RecentEvents { get; }
+    IReadOnlyList<SharedSyncConflict> ActiveConflicts { get; }
+    bool HasConflict { get; }
 
     Task StartAsync(SyncProfile profile, CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
     Task SwitchProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default);
     Task ReconcileNowAsync(CancellationToken cancellationToken = default);
     Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default);
+}
+
+public class SharedSyncConflict
+{
+    public Guid? FileId { get; set; }
+    public string RelativePath { get; set; } = string.Empty;
+    public string ConflictType { get; set; } = string.Empty;
+    public string? LocalSha256 { get; set; }
+    public string? RemoteSha256 { get; set; }
+    public int? LocalBaseVersion { get; set; }
+    public int RemoteVersion { get; set; }
+    public DateTime DetectedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
 public class DebouncedFileEvent
@@ -86,6 +100,40 @@ public class SyncEngine : ISyncEngine
                 return _pendingEvents.Count;
             }
         }
+    }
+
+    private readonly List<SharedSyncConflict> _activeConflicts = new();
+    private readonly object _conflictsLock = new();
+
+    public IReadOnlyList<SharedSyncConflict> ActiveConflicts
+    {
+        get
+        {
+            lock (_conflictsLock)
+            {
+                return _activeConflicts.ToList();
+            }
+        }
+    }
+
+    public bool HasConflict
+    {
+        get
+        {
+            lock (_conflictsLock)
+            {
+                return _activeConflicts.Count > 0;
+            }
+        }
+    }
+
+    private void AddConflict(SharedSyncConflict conflict)
+    {
+        lock (_conflictsLock)
+        {
+            _activeConflicts.Add(conflict);
+        }
+        Log($"[SyncEngine] Conflict detected on '{conflict.RelativePath}' ({conflict.ConflictType}). Deferred to Change-set #3.", "WARN");
     }
 
     public IReadOnlyList<SyncLogEntry> RecentEvents
@@ -349,6 +397,12 @@ public class SyncEngine : ISyncEngine
             return;
         }
 
+        if (_activeProfile.AccessMode == Backup.Shared.Messages.BackupSetAccessMode.Shared)
+        {
+            await ExecuteSharedReconciliationInternalAsync(cancellationToken);
+            return;
+        }
+
         string root = _activeProfile.LocalRootPath;
         Guid backupSetId = _activeProfile.BackupSetId;
 
@@ -442,7 +496,11 @@ public class SyncEngine : ISyncEngine
                         RelativePath = item.RelativePath,
                         Size = len,
                         LastWriteTimeUtc = lastWrite,
-                        Sha256 = sha
+                        Sha256 = sha,
+                        FileId = uploadResp.FileId,
+                        LastSyncedServerVersion = uploadResp.VersionNumber ?? 1,
+                        LastSyncedSha256 = sha,
+                        IsDeletedOnServer = false
                     };
                 }
                 else
@@ -509,6 +567,521 @@ public class SyncEngine : ISyncEngine
             ReconciliationRequired = true;
             LastSyncResult = $"Reconciliation error: {ex.Message}";
             Log($"[SyncEngine] Reconciliation error: {ex.Message}", "ERROR");
+        }
+        finally
+        {
+            IsReconciling = false;
+        }
+    }
+
+    private async Task ExecuteSharedReconciliationInternalAsync(CancellationToken cancellationToken)
+    {
+        if (_activeProfile == null) return;
+
+        string root = _activeProfile.LocalRootPath;
+        Guid backupSetId = _activeProfile.BackupSetId;
+
+        if (!Directory.Exists(root))
+        {
+            Directory.CreateDirectory(root);
+        }
+
+        Log($"[SyncEngine] Shared bidirectional reconciliation started for BackupSet {backupSetId}");
+        IsReconciling = true;
+
+        try
+        {
+            // PHASE 1: Fetch Server Manifest
+            var identity = await _identityService.GetStateAsync(cancellationToken);
+            var manifestResp = await _gatewayClient.GetBackupSetManifestAsync(new GetBackupSetManifestRequest
+            {
+                BackupSetId = backupSetId,
+                ClientId = identity.ClientId
+            }, cancellationToken);
+
+            if (!manifestResp.Success)
+            {
+                LastSyncResult = $"Manifest failed: {manifestResp.ErrorMessage}";
+                Log($"[SyncEngine] Manifest reconciliation failed: {manifestResp.ErrorMessage}", "ERROR");
+                ReconciliationRequired = true;
+                return;
+            }
+
+            var manifestEntries = manifestResp.Entries ?? new List<BackupSetManifestEntryDto>();
+            Log($"[SyncEngine] Server manifest received with {manifestEntries.Count} entries.");
+
+            // PHASE 2: Scan Local Directory
+            var localIndex = await _indexService.LoadIndexAsync(backupSetId, cancellationToken);
+            var scanResult = await _scanner.ScanDirectoryAsync(root, localIndex, cancellationToken);
+            Log($"[SyncEngine] Scanned {scanResult.ManifestEntries.Count} local files.");
+
+            // PHASE 3: Classify changes
+            lock (_conflictsLock)
+            {
+                _activeConflicts.Clear();
+            }
+
+            var manifestByPath = manifestEntries.ToDictionary(e => e.RelativePath, StringComparer.OrdinalIgnoreCase);
+            var manifestByFileId = manifestEntries.ToDictionary(e => e.FileId);
+            var localFiles = scanResult.ScannedIndexEntries; // RelativePath -> LocalFileIndexEntry
+
+            var remoteDownloads = new List<BackupSetManifestEntryDto>();
+            var remoteRenames = new List<(string OldRelative, string NewRelative, BackupSetManifestEntryDto Entry)>();
+            var remoteDeletes = new List<(string RelativePath, BackupSetManifestEntryDto Entry)>();
+
+            var processedServerFileIds = new HashSet<Guid>();
+
+            foreach (var mEntry in manifestEntries)
+            {
+                string normPath = mEntry.RelativePath.Replace('\\', '/');
+                if (mEntry.IsDeleted)
+                {
+                    // Server deleted
+                    bool existsLocally = localFiles.TryGetValue(mEntry.RelativePath, out var localFile)
+                        || localFiles.TryGetValue(normPath, out localFile);
+
+                    if (existsLocally && localFile != null)
+                    {
+                        // File exists locally. Did it change locally since last sync?
+                        bool hasIdx = localIndex.Entries.TryGetValue(mEntry.RelativePath, out var idx)
+                            || localIndex.Entries.TryGetValue(normPath, out idx);
+
+                        if (hasIdx && idx != null && !string.IsNullOrEmpty(idx.LastSyncedSha256)
+                            && string.Equals(idx.LastSyncedSha256, localFile.Sha256, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Not modified locally. Safe to delete locally.
+                            remoteDeletes.Add((mEntry.RelativePath, mEntry));
+                        }
+                        else
+                        {
+                            // Modified locally or untracked -> CONFLICT
+                            AddConflict(new SharedSyncConflict
+                            {
+                                FileId = mEntry.FileId,
+                                RelativePath = normPath,
+                                ConflictType = "RemoteDeleteLocalModify",
+                                LocalSha256 = localFile.Sha256,
+                                RemoteVersion = mEntry.CurrentVersionNumber
+                            });
+                        }
+                    }
+                    else
+                    {
+                        localIndex.Entries.Remove(mEntry.RelativePath);
+                        localIndex.Entries.Remove(normPath);
+                    }
+                    processedServerFileIds.Add(mEntry.FileId);
+                    continue;
+                }
+
+                // Server active file
+                // Check if we have this FileId recorded under a different local path (Remote Rename)
+                var existingIndexRename = localIndex.Entries.Values.FirstOrDefault(i =>
+                    i.FileId == mEntry.FileId
+                    && !string.Equals(i.RelativePath, mEntry.RelativePath, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(i.RelativePath.Replace('\\', '/'), normPath, StringComparison.OrdinalIgnoreCase));
+
+                if (existingIndexRename != null && (localFiles.TryGetValue(existingIndexRename.RelativePath, out var oldLocalFile)
+                    || localFiles.TryGetValue(existingIndexRename.RelativePath.Replace('\\', '/'), out oldLocalFile)))
+                {
+                    // Source exists locally. Is destination occupied?
+                    if (localFiles.ContainsKey(mEntry.RelativePath) || localFiles.ContainsKey(normPath))
+                    {
+                        AddConflict(new SharedSyncConflict
+                        {
+                            FileId = mEntry.FileId,
+                            RelativePath = normPath,
+                            ConflictType = "RemoteRenameDestinationOccupied",
+                            RemoteVersion = mEntry.CurrentVersionNumber
+                        });
+                    }
+                    else if (!string.IsNullOrEmpty(existingIndexRename.LastSyncedSha256)
+                        && !string.Equals(existingIndexRename.LastSyncedSha256, oldLocalFile.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Source file was locally modified -> CONFLICT
+                        AddConflict(new SharedSyncConflict
+                        {
+                            FileId = mEntry.FileId,
+                            RelativePath = existingIndexRename.RelativePath,
+                            ConflictType = "RemoteRenameSourceModified",
+                            LocalSha256 = oldLocalFile.Sha256,
+                            RemoteVersion = mEntry.CurrentVersionNumber
+                        });
+                    }
+                    else
+                    {
+                        // Safe remote rename
+                        remoteRenames.Add((existingIndexRename.RelativePath, mEntry.RelativePath, mEntry));
+                    }
+                    processedServerFileIds.Add(mEntry.FileId);
+                    continue;
+                }
+
+                // Not a rename. Check by relative path.
+                bool hasCurrentLocal = localFiles.TryGetValue(mEntry.RelativePath, out var currentLocal)
+                    || localFiles.TryGetValue(normPath, out currentLocal);
+
+                if (!hasCurrentLocal || currentLocal == null)
+                {
+                    // File does not exist locally.
+                    // Did this client previously have this file synced at the server's current version?
+                    bool hasIdx = localIndex.Entries.TryGetValue(mEntry.RelativePath, out var idx)
+                        || localIndex.Entries.TryGetValue(normPath, out idx);
+
+                    if (hasIdx && idx != null && idx.LastSyncedServerVersion > 0 && idx.LastSyncedServerVersion == mEntry.CurrentVersionNumber)
+                    {
+                        // The client already had this file at the current server version, and now it is missing locally.
+                        // That is a LOCAL DELETE! Do NOT redownload it!
+                        // It will be processed in Phase 6 as a local delete push to server.
+                    }
+                    else if (hasIdx && idx != null && idx.LastSyncedServerVersion > 0 && mEntry.CurrentVersionNumber > idx.LastSyncedServerVersion)
+                    {
+                        // Concurrently modified remotely while deleted locally -> CONFLICT
+                        AddConflict(new SharedSyncConflict
+                        {
+                            FileId = mEntry.FileId,
+                            RelativePath = normPath,
+                            ConflictType = "RemoteModifyLocalDelete",
+                            RemoteVersion = mEntry.CurrentVersionNumber
+                        });
+                    }
+                    else
+                    {
+                        // Genuinely missing file or remote create -> Safe remote download
+                        remoteDownloads.Add(mEntry);
+                    }
+                }
+                else
+                {
+                    // File exists locally. Compare hashes & versions.
+                    if (string.Equals(currentLocal.Sha256, mEntry.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Hashes match! Update index with authoritative server info without redownload.
+                        localIndex.Entries[normPath] = new LocalFileIndexEntry
+                        {
+                            RelativePath = normPath,
+                            Size = currentLocal.Size,
+                            LastWriteTimeUtc = currentLocal.LastWriteTimeUtc,
+                            Sha256 = currentLocal.Sha256,
+                            FileId = mEntry.FileId,
+                            LastSyncedServerVersion = mEntry.CurrentVersionNumber,
+                            LastSyncedSha256 = mEntry.Sha256,
+                            IsDeletedOnServer = false
+                        };
+                    }
+                    else
+                    {
+                        // Hashes differ!
+                        bool hasIdx = localIndex.Entries.TryGetValue(mEntry.RelativePath, out var idx)
+                            || localIndex.Entries.TryGetValue(normPath, out idx);
+
+                        if (hasIdx && idx != null
+                            && idx.LastSyncedServerVersion > 0
+                            && mEntry.CurrentVersionNumber > idx.LastSyncedServerVersion)
+                        {
+                            // Server advanced to a newer version.
+                            // Did local file change since last sync?
+                            if (string.Equals(currentLocal.Sha256, idx.LastSyncedSha256, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Local file was not modified. Safe to replace with remote version!
+                                remoteDownloads.Add(mEntry);
+                            }
+                            else
+                            {
+                                // Both sides changed -> CONFLICT
+                                AddConflict(new SharedSyncConflict
+                                {
+                                    FileId = mEntry.FileId,
+                                    RelativePath = normPath,
+                                    ConflictType = "RemoteModifyLocalModify",
+                                    LocalSha256 = currentLocal.Sha256,
+                                    RemoteSha256 = mEntry.Sha256,
+                                    LocalBaseVersion = idx.LastSyncedServerVersion,
+                                    RemoteVersion = mEntry.CurrentVersionNumber
+                                });
+                            }
+                        }
+                        else if (hasIdx && idx != null && idx.LastSyncedServerVersion == mEntry.CurrentVersionNumber)
+                        {
+                            // Server did not change. Local modified! Will be pushed in Phase 6.
+                        }
+                        else
+                        {
+                            // Collision between untracked local file and server file with different hash -> CONFLICT
+                            AddConflict(new SharedSyncConflict
+                            {
+                                FileId = mEntry.FileId,
+                                RelativePath = normPath,
+                                ConflictType = "RemoteCreateCollision",
+                                LocalSha256 = currentLocal.Sha256,
+                                RemoteSha256 = mEntry.Sha256,
+                                RemoteVersion = mEntry.CurrentVersionNumber
+                            });
+                        }
+                    }
+                }
+                processedServerFileIds.Add(mEntry.FileId);
+            }
+
+            // PHASE 4: Apply safe REMOTE changes
+            int remoteAppliedCount = 0;
+
+            // 4a. Apply Renames
+            foreach (var (oldRel, newRel, mEntry) in remoteRenames)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string oldFull = Path.Combine(root, oldRel);
+                string newFull = Path.Combine(root, newRel);
+
+                if (File.Exists(oldFull))
+                {
+                    string? dir = Path.GetDirectoryName(newFull);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
+                    _suppressionService.RegisterSuppression(oldRel, mEntry.Sha256, TimeSpan.FromSeconds(30));
+                    _suppressionService.RegisterSuppression(newRel, mEntry.Sha256, TimeSpan.FromSeconds(30));
+
+                    if (File.Exists(newFull))
+                    {
+                        File.Delete(newFull);
+                    }
+                    File.Move(oldFull, newFull);
+
+                    localIndex.Entries.Remove(oldRel);
+                    localIndex.Entries[newRel] = new LocalFileIndexEntry
+                    {
+                        RelativePath = newRel,
+                        Size = mEntry.Size,
+                        LastWriteTimeUtc = File.GetLastWriteTimeUtc(newFull),
+                        Sha256 = mEntry.Sha256,
+                        FileId = mEntry.FileId,
+                        LastSyncedServerVersion = mEntry.CurrentVersionNumber,
+                        LastSyncedSha256 = mEntry.Sha256,
+                        IsDeletedOnServer = false
+                    };
+
+                    remoteAppliedCount++;
+                    Log($"[SyncEngine] Applied remote rename: {oldRel} -> {newRel}");
+                }
+            }
+
+            // 4b. Apply Deletes
+            foreach (var (relPath, mEntry) in remoteDeletes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string normDel = relPath.Replace('\\', '/');
+                string fullPath = Path.Combine(root, normDel);
+                if (File.Exists(fullPath))
+                {
+                    _suppressionService.RegisterSuppression(relPath, mEntry.Sha256, TimeSpan.FromSeconds(30));
+                    _suppressionService.RegisterSuppression(normDel, mEntry.Sha256, TimeSpan.FromSeconds(30));
+                    File.Delete(fullPath);
+                    localIndex.Entries.Remove(relPath);
+                    localIndex.Entries.Remove(normDel);
+                    remoteAppliedCount++;
+                    Log($"[SyncEngine] Applied remote delete: {normDel}");
+                }
+                else
+                {
+                    localIndex.Entries.Remove(relPath);
+                    localIndex.Entries.Remove(normDel);
+                }
+            }
+
+            // 4c. Apply Downloads
+            foreach (var mEntry in remoteDownloads)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Suppress watcher echo before writing target
+                _suppressionService.RegisterSuppression(mEntry.RelativePath, mEntry.Sha256, TimeSpan.FromSeconds(30));
+
+                var dlResult = await _gatewayClient.DownloadSharedFileVersionAsync(new DownloadFileVersionRequest
+                {
+                    BackupSetId = backupSetId,
+                    FileId = mEntry.FileId,
+                    VersionNumber = mEntry.CurrentVersionNumber,
+                    ClientId = identity.ClientId
+                }, root, cancellationToken);
+
+                if (dlResult.Success)
+                {
+                    // Atomic move temp file to target
+                    if (File.Exists(dlResult.TargetFilePath))
+                    {
+                        File.Delete(dlResult.TargetFilePath);
+                    }
+                    File.Move(dlResult.TempFilePath, dlResult.TargetFilePath);
+
+                    localIndex.Entries[mEntry.RelativePath] = new LocalFileIndexEntry
+                    {
+                        RelativePath = mEntry.RelativePath,
+                        Size = dlResult.Size,
+                        LastWriteTimeUtc = File.GetLastWriteTimeUtc(dlResult.TargetFilePath),
+                        Sha256 = dlResult.Sha256 ?? mEntry.Sha256,
+                        FileId = mEntry.FileId,
+                        LastSyncedServerVersion = mEntry.CurrentVersionNumber,
+                        LastSyncedSha256 = dlResult.Sha256 ?? mEntry.Sha256,
+                        IsDeletedOnServer = false
+                    };
+
+                    remoteAppliedCount++;
+                    Log($"[SyncEngine] Downloaded remote file {mEntry.RelativePath} (v{mEntry.CurrentVersionNumber})");
+                }
+                else
+                {
+                    _suppressionService.RemoveSuppression(mEntry.RelativePath);
+                    Log($"[SyncEngine] Failed to download {mEntry.RelativePath}: {dlResult.ErrorMessage}", "WARN");
+                    ReconciliationRequired = true;
+                }
+            }
+
+            // PHASE 5: Rescan local directory
+            var postScan = await _scanner.ScanDirectoryAsync(root, localIndex, cancellationToken);
+            var currentLocalFiles = postScan.ScannedIndexEntries;
+
+            // PHASE 6: Push safe LOCAL changes
+            int localUploadedCount = 0;
+            int localDeletedCount = 0;
+
+            var conflictPaths = new HashSet<string>(ActiveConflicts.Select(c => c.RelativePath), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (relPath, localFile) in currentLocalFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (conflictPaths.Contains(relPath))
+                {
+                    continue; // Skip conflicted files
+                }
+
+                bool isLocalCreate = !manifestByPath.TryGetValue(relPath, out var serverEntry) || serverEntry.IsDeleted;
+                bool isLocalModify = !isLocalCreate && serverEntry != null
+                    && serverEntry.CurrentVersionNumber == (localIndex.Entries.TryGetValue(relPath, out var idx) ? idx.LastSyncedServerVersion : 0)
+                    && !string.Equals(serverEntry.Sha256, localFile.Sha256, StringComparison.OrdinalIgnoreCase);
+
+                if (isLocalCreate || isLocalModify)
+                {
+                    string fullPath = Path.Combine(root, relPath);
+                    bool stable = await _stabilityHelper.WaitForFileStabilityAsync(fullPath, cancellationToken);
+                    if (!stable)
+                    {
+                        Log($"[SyncEngine] Local file '{relPath}' locked. Scheduling retry.", "WARN");
+                        ReconciliationRequired = true;
+                        continue;
+                    }
+
+                    var uploadResp = await _gatewayClient.BackupFileAsync(
+                        backupSetId,
+                        relPath,
+                        fullPath,
+                        identity.ClientId,
+                        cancellationToken,
+                        localFile.Sha256,
+                        localFile.Size);
+
+                    if (uploadResp.Success)
+                    {
+                        localUploadedCount++;
+                        int v = uploadResp.VersionNumber ?? 1;
+                        localIndex.Entries[relPath] = new LocalFileIndexEntry
+                        {
+                            RelativePath = relPath,
+                            Size = localFile.Size,
+                            LastWriteTimeUtc = File.GetLastWriteTimeUtc(fullPath),
+                            Sha256 = localFile.Sha256,
+                            FileId = uploadResp.FileId,
+                            LastSyncedServerVersion = v,
+                            LastSyncedSha256 = localFile.Sha256,
+                            IsDeletedOnServer = false
+                        };
+                        Log($"[SyncEngine] Uploaded local change for {relPath} (v{v})");
+                    }
+                    else
+                    {
+                        Log($"[SyncEngine] Local upload failed for '{relPath}': {uploadResp.ErrorMessage}", "WARN");
+                        ReconciliationRequired = true;
+                    }
+                }
+            }
+
+            // Local Deletions: in localIndex but not on disk, where server has not advanced
+            var locallyDeletedKeys = localIndex.Entries.Keys
+                .Where(k => !currentLocalFiles.ContainsKey(k)
+                         && !currentLocalFiles.ContainsKey(k.Replace('\\', '/'))
+                         && !conflictPaths.Contains(k))
+                .ToList();
+
+            foreach (var delPath in locallyDeletedKeys)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var idx = localIndex.Entries[delPath];
+                string normDelPath = delPath.Replace('\\', '/');
+
+                if ((manifestByPath.TryGetValue(delPath, out var mEntry) || manifestByPath.TryGetValue(normDelPath, out mEntry)) && !mEntry.IsDeleted)
+                {
+                    if (mEntry.CurrentVersionNumber == idx.LastSyncedServerVersion)
+                    {
+                        // Server did not change -> Safe LOCAL DELETE!
+                        var delResp = await _gatewayClient.DeleteFileAsync(new FileDeletedRequest
+                        {
+                            ClientId = identity.ClientId ?? Guid.Empty,
+                            BackupSetId = backupSetId,
+                            RelativePath = normDelPath
+                        }, cancellationToken);
+
+                        if (delResp.Success)
+                        {
+                            localDeletedCount++;
+                            localIndex.Entries.Remove(delPath);
+                            localIndex.Entries.Remove(normDelPath);
+                            Log($"[SyncEngine] Pushed local delete to server: {normDelPath}");
+                        }
+                    }
+                    else
+                    {
+                        // Server modified while locally deleted -> CONFLICT
+                        AddConflict(new SharedSyncConflict
+                        {
+                            FileId = mEntry.FileId,
+                            RelativePath = normDelPath,
+                            ConflictType = "RemoteModifyLocalDelete",
+                            RemoteVersion = mEntry.CurrentVersionNumber
+                        });
+                    }
+                }
+                else
+                {
+                    localIndex.Entries.Remove(delPath);
+                    localIndex.Entries.Remove(normDelPath);
+                }
+            }
+
+            // PHASE 7: Persist final LocalFileIndex
+            await _indexService.SaveIndexAsync(localIndex, cancellationToken);
+
+            LastReconciliationUtc = DateTime.UtcNow;
+            if (ActiveConflicts.Count > 0)
+            {
+                ReconciliationRequired = true;
+                LastSyncResult = $"Conflicts detected: {ActiveConflicts.Count} conflict(s) pending resolution.";
+                Log($"[SyncEngine] Reconciliation completed with {ActiveConflicts.Count} conflict(s).", "WARN");
+            }
+            else
+            {
+                ReconciliationRequired = false;
+                LastSyncResult = $"Success. Applied: {remoteAppliedCount} remote, Uploaded: {localUploadedCount} local, Deleted: {localDeletedCount} local.";
+                Log($"[SyncEngine] Reconciliation completed cleanly. {LastSyncResult}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ReconciliationRequired = true;
+            LastSyncResult = $"Shared reconciliation error: {ex.Message}";
+            Log($"[SyncEngine] Shared reconciliation error: {ex.Message}", "ERROR");
         }
         finally
         {
@@ -766,7 +1339,11 @@ public class SyncEngine : ISyncEngine
                                 RelativePath = item.Key,
                                 Size = len,
                                 LastWriteTimeUtc = lastWrite,
-                                Sha256 = sha
+                                Sha256 = sha,
+                                FileId = uploadResp.FileId,
+                                LastSyncedServerVersion = uploadResp.VersionNumber ?? 1,
+                                LastSyncedSha256 = sha,
+                                IsDeletedOnServer = false
                             };
                             await _indexService.SaveIndexAsync(index, cancellationToken);
                         }
@@ -782,6 +1359,13 @@ public class SyncEngine : ISyncEngine
                 case FileChangeKind.Deleted:
                 {
                     using var pathLock = await _pathLocks.LockAsync(item.Key, cancellationToken);
+                    if (_suppressionService.IsSuppressed(item.Key))
+                    {
+                        _suppressionService.RemoveSuppression(item.Key);
+                        Log($"[SyncEngine] Watcher echo suppressed for remote delete: {item.Key}");
+                        return;
+                    }
+
                     Log($"[FileWatcher] Debounced -> delete: {item.Key}");
 
                     var delResp = await _gatewayClient.DeleteFileAsync(new FileDeletedRequest
@@ -817,6 +1401,14 @@ public class SyncEngine : ISyncEngine
                         {
                             oldRelative = normOld;
                         }
+                    }
+
+                    if (_suppressionService.IsSuppressed(item.Key) || (!string.IsNullOrEmpty(oldRelative) && _suppressionService.IsSuppressed(oldRelative)))
+                    {
+                        _suppressionService.RemoveSuppression(item.Key);
+                        if (!string.IsNullOrEmpty(oldRelative)) _suppressionService.RemoveSuppression(oldRelative);
+                        Log($"[SyncEngine] Watcher echo suppressed for remote rename: {oldRelative} -> {item.Key}");
+                        return;
                     }
 
                     var index = await _indexService.LoadIndexAsync(backupSetId, cancellationToken);

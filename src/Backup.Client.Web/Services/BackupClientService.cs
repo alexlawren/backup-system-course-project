@@ -9,6 +9,9 @@ public interface IBackupClientService
     Task<ClientState> GetIdentityAsync(CancellationToken cancellationToken = default);
     Task<bool> EnsureRegisteredAsync(CancellationToken cancellationToken = default);
     Task<CreateBackupSetResponse> CreateBackupSetAsync(string name, string localRootPath, CancellationToken cancellationToken = default);
+    Task<CreateBackupSetResponse> CreateBackupSetAsync(string name, string localRootPath, BackupSetAccessMode accessMode, CancellationToken cancellationToken = default);
+    Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(string shareCode, CancellationToken cancellationToken = default);
+    Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(Guid backupSetId, CancellationToken cancellationToken = default);
     Task<UploadCompletedResponse> BackupSingleFileAsync(Guid backupSetId, string localRootPath, string absoluteFilePath, CancellationToken cancellationToken = default);
     Task<bool> PingGatewayAsync(CancellationToken cancellationToken = default);
     Task<GetFilesResponse> GetFilesAsync(Guid backupSetId, bool includeDeleted = true, CancellationToken cancellationToken = default);
@@ -77,9 +80,18 @@ public class BackupClientService : IBackupClientService
         return false;
     }
 
+    public Task<CreateBackupSetResponse> CreateBackupSetAsync(
+        string name,
+        string localRootPath,
+        CancellationToken cancellationToken = default)
+    {
+        return CreateBackupSetAsync(name, localRootPath, BackupSetAccessMode.Private, cancellationToken);
+    }
+
     public async Task<CreateBackupSetResponse> CreateBackupSetAsync(
         string name,
         string localRootPath,
+        BackupSetAccessMode accessMode,
         CancellationToken cancellationToken = default)
     {
         var state = await _identityService.GetStateAsync(cancellationToken);
@@ -101,10 +113,39 @@ public class BackupClientService : IBackupClientService
         {
             ClientId = state.ClientId!.Value,
             Name = name,
-            LocalRootPath = localRootPath
+            LocalRootPath = localRootPath,
+            AccessMode = accessMode
         };
 
         return await _gatewayClient.CreateBackupSetAsync(request, cancellationToken);
+    }
+
+    public async Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(string shareCode, CancellationToken cancellationToken = default)
+    {
+        var state = await _identityService.GetStateAsync(cancellationToken);
+        if (state.ClientId == null)
+        {
+            await EnsureRegisteredAsync(cancellationToken);
+            state = await _identityService.GetStateAsync(cancellationToken);
+        }
+
+        var req = new JoinSharedBackupSetRequest
+        {
+            ShareCode = shareCode,
+            ClientId = state.ClientId
+        };
+        return await _gatewayClient.JoinSharedBackupSetAsync(req, cancellationToken);
+    }
+
+    public async Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(Guid backupSetId, CancellationToken cancellationToken = default)
+    {
+        var state = await _identityService.GetStateAsync(cancellationToken);
+        var req = new GetBackupSetMembersRequest
+        {
+            BackupSetId = backupSetId,
+            ClientId = state.ClientId
+        };
+        return await _gatewayClient.GetBackupSetMembersAsync(req, cancellationToken);
     }
 
     public async Task<UploadCompletedResponse> BackupSingleFileAsync(

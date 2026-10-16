@@ -63,5 +63,12 @@ public enum MessageType
     JoinSharedBackupSet,
     JoinSharedBackupSetResult,
     GetBackupSetMembers,
-    GetBackupSetMembersResult
+    GetBackupSetMembersResult,
+
+    // Server manifest & bidirectional sync
+    GetBackupSetManifest,
+    GetBackupSetManifestResult,
+    DownloadFileVersion,
+    DownloadFileVersionReady,
+    DownloadFileVersionData
 }

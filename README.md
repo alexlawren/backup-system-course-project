@@ -36,6 +36,40 @@
 
 ---
 
+### ДЕМОНСТРАЦИЯ ДВУХ КЛИЕНТОВ (Two-Client Shared Demo)
+
+Для демонстрации совместной работы двух независимых клиентов над одним общим набором резервного копирования разработаны выделенные скрипты:
+
+```powershell
+.\start-shared-demo.ps1
+```
+
+Скрипт компилирует проект, проверяет базу данных PostgreSQL (:5432) и запускает 5 независимых процессов с изолированными директориями данных:
+- **Metadata Service (TCP):** `127.0.0.1:5001`
+- **Storage Service (TCP):** `127.0.0.1:5002`
+- **Sync Gateway (TCP):** `127.0.0.1:5000`
+- **Клиент A (Web UI):** 👉 `http://localhost:5100` (данные: `data/client-a`)
+- **Клиент B (Web UI):** 👉 `http://localhost:5200` (данные: `data/client-b`)
+
+Остановка демо-окружения:
+```powershell
+.\stop-shared-demo.ps1
+```
+
+---
+
+**SHARED STORAGE CHANGE-SET #2:** BIDIRECTIONAL SHARED SYNCHRONIZATION (SERVER → CLIENT) + 250 TESTS GREEN
+- **Membership:** полностью готова серверная авторизация (`OWNER` / `MEMBER`), инвариант единого namespace хранилища владельца, ShareCode;
+- **Bidirectional Sequential Synchronization:** двусторонняя синхронизация `LOCAL ↔ SERVER` на базе 7-фазного пайплайна сверки (`ExecuteSharedReconciliationInternalAsync`);
+- **Remote Operations:** безопасное применение серверных изменений (`CREATE`, `MODIFY`, `RENAME`, `DELETE`) на клиентах без ложного создания новых версий и без записей в ChangeLog;
+- **Initial Bootstrap:** новый участник подключается с пустым каталогом и скачивает все актуальные файлы набора с сохранением номеров версий;
+- **Offline Catchup & Reconnect:** выключенный клиент при старте/реконнекте получает серверный манифест и догоняет пропущенные изменения;
+- **Simultaneous-Write Divergence Safety:** при одновременных расходящихся изменениях система предотвращает тихую перезапись (`ConflictPending`), сохраняет обе стороны, а автоматическое создание conflict copies переносится в Change-set #3;
+- **UI:** выбор типа набора (Личный / Общий), отображение ShareCode с копированием, секция подключения к общему набору, счетчик и список участников, статус «Конфликт»;
+- **Тесты:** 250 автоматических тестов в зеленой зоне (218 baseline + 32 новых теста двусторонней синхронизации).
+
+---
+
 **SHARED STORAGE CHANGE-SET #1:** SHARED BACKUP SET MEMBERSHIP FOUNDATION + 212 TESTS GREEN
 - Расширение модели наборов резервного копирования: режим доступа `AccessMode` (`PRIVATE` / `SHARED`), защищенный криптографический код доступа `ShareCode` (31 однозначный символ, формат `XXXX-XXXX`);
 - Новая реляционная сущность `backup_set_members`: связь рабочих станций и наборов, роли `OWNER` и `MEMBER`, миграция БД EF Core с автоматическим бэкфиллом существующих наборов;
