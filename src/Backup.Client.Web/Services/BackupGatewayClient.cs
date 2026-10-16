@@ -758,6 +758,92 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         }
     }
 
+    public async Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(
+        JoinSharedBackupSetRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _connectionLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureConnectedAsync(cancellationToken);
+
+            await _writer.WriteJsonFrameAsync(_stream!, MessageType.JoinSharedBackupSet, request, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+            if (respHeader == null)
+            {
+                MarkDisconnected();
+                throw new ProtocolException("Remote host closed TCP connection.");
+            }
+
+            if (respHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+                return new JoinSharedBackupSetResponse { Success = false, ErrorMessage = err?.Message ?? "Failed to join shared backup set." };
+            }
+
+            if (respHeader.MessageType != MessageType.JoinSharedBackupSetResult)
+            {
+                throw new ProtocolException($"Expected JoinSharedBackupSetResult, received '{respHeader.MessageType}'.");
+            }
+
+            var result = await _reader.ReadJsonBodyAsync<JoinSharedBackupSetResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+            return result ?? new JoinSharedBackupSetResponse { Success = false, ErrorMessage = "Empty JoinSharedBackupSetResult received." };
+        }
+        catch (Exception)
+        {
+            MarkDisconnected();
+            throw;
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
+    }
+
+    public async Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(
+        GetBackupSetMembersRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        await _connectionLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureConnectedAsync(cancellationToken);
+
+            await _writer.WriteJsonFrameAsync(_stream!, MessageType.GetBackupSetMembers, request, cancellationToken: cancellationToken);
+            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
+
+            if (respHeader == null)
+            {
+                MarkDisconnected();
+                throw new ProtocolException("Remote host closed TCP connection.");
+            }
+
+            if (respHeader.MessageType == MessageType.Error)
+            {
+                var err = await _reader.ReadJsonBodyAsync<ErrorMessage>(_stream!, respHeader.BodyLength, cancellationToken);
+                return new GetBackupSetMembersResponse { Success = false, ErrorMessage = err?.Message ?? "Failed to get members." };
+            }
+
+            if (respHeader.MessageType != MessageType.GetBackupSetMembersResult)
+            {
+                throw new ProtocolException($"Expected GetBackupSetMembersResult, received '{respHeader.MessageType}'.");
+            }
+
+            var result = await _reader.ReadJsonBodyAsync<GetBackupSetMembersResponse>(_stream!, respHeader.BodyLength, cancellationToken);
+            return result ?? new GetBackupSetMembersResponse { Success = false, ErrorMessage = "Empty GetBackupSetMembersResult received." };
+        }
+        catch (Exception)
+        {
+            MarkDisconnected();
+            throw;
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
+    }
+
     public async Task<RestoreDownloadResult> DownloadAndVerifyRestoreFileAsync(
         RestoreRequest request,
         string localRootPath,

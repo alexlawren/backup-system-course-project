@@ -10,8 +10,10 @@ public class ChangeLogEntity
     public string Status { get; set; } = string.Empty;
     public string? Details { get; set; }
     public DateTime CreatedAtUtc { get; set; }
+    public Guid? ActorClientId { get; set; }
 
     public ClientEntity Client { get; set; } = null!;
+    public ClientEntity? ActorClient { get; set; }
     public BackupSetEntity BackupSet { get; set; } = null!;
     public FileEntity? File { get; set; }
 }

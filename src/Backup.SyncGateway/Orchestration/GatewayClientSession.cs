@@ -10,6 +10,7 @@ public class ActiveUploadContext
     public long ExpectedSize { get; set; }
     public string ExpectedSha256 { get; set; } = string.Empty;
     public Guid PrepareMessageId { get; set; }
+    public Guid? ActorClientId { get; set; }
 }
 
 /// <summary>

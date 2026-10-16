@@ -28,6 +28,13 @@ namespace Backup.MetadataService.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AccessMode")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("PRIVATE");
+
                     b.Property<Guid>("ClientId")
                         .HasColumnType("uuid");
 
@@ -49,11 +56,46 @@ namespace Backup.MetadataService.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("ShareCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ClientId");
 
+                    b.HasIndex("ShareCode")
+                        .IsUnique();
+
                     b.ToTable("backup_sets", (string)null);
+                });
+
+            modelBuilder.Entity("Backup.MetadataService.Entities.BackupSetMemberEntity", b =>
+                {
+                    b.Property<Guid>("BackupSetId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClientId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("JoinedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastSeenAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("MEMBER");
+
+                    b.HasKey("BackupSetId", "ClientId");
+
+                    b.HasIndex("ClientId");
+
+                    b.ToTable("backup_set_members", (string)null);
                 });
 
             modelBuilder.Entity("Backup.MetadataService.Entities.ChangeLogEntity", b =>
@@ -66,6 +108,9 @@ namespace Backup.MetadataService.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<Guid?>("ActorClientId")
+                        .HasColumnType("uuid");
 
                     b.Property<Guid>("BackupSetId")
                         .HasColumnType("uuid");
@@ -89,6 +134,8 @@ namespace Backup.MetadataService.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ActorClientId");
 
                     b.HasIndex("BackupSetId");
 
@@ -215,6 +262,9 @@ namespace Backup.MetadataService.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("ActorClientId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
@@ -262,8 +312,32 @@ namespace Backup.MetadataService.Migrations
                     b.Navigation("Client");
                 });
 
+            modelBuilder.Entity("Backup.MetadataService.Entities.BackupSetMemberEntity", b =>
+                {
+                    b.HasOne("Backup.MetadataService.Entities.BackupSetEntity", "BackupSet")
+                        .WithMany("Members")
+                        .HasForeignKey("BackupSetId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Backup.MetadataService.Entities.ClientEntity", "Client")
+                        .WithMany("Memberships")
+                        .HasForeignKey("ClientId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("BackupSet");
+
+                    b.Navigation("Client");
+                });
+
             modelBuilder.Entity("Backup.MetadataService.Entities.ChangeLogEntity", b =>
                 {
+                    b.HasOne("Backup.MetadataService.Entities.ClientEntity", "ActorClient")
+                        .WithMany()
+                        .HasForeignKey("ActorClientId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("Backup.MetadataService.Entities.BackupSetEntity", "BackupSet")
                         .WithMany("ChangeLogs")
                         .HasForeignKey("BackupSetId")
@@ -280,6 +354,8 @@ namespace Backup.MetadataService.Migrations
                         .WithMany("ChangeLogs")
                         .HasForeignKey("FileId")
                         .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("ActorClient");
 
                     b.Navigation("BackupSet");
 
@@ -326,6 +402,8 @@ namespace Backup.MetadataService.Migrations
                     b.Navigation("ChangeLogs");
 
                     b.Navigation("Files");
+
+                    b.Navigation("Members");
                 });
 
             modelBuilder.Entity("Backup.MetadataService.Entities.ClientEntity", b =>
@@ -333,6 +411,8 @@ namespace Backup.MetadataService.Migrations
                     b.Navigation("BackupSets");
 
                     b.Navigation("ChangeLogs");
+
+                    b.Navigation("Memberships");
                 });
 
             modelBuilder.Entity("Backup.MetadataService.Entities.FileEntity", b =>

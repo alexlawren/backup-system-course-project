@@ -14,4 +14,6 @@ public interface IMetadataApplicationService
     Task<GetVersionsResponse> GetVersionsAsync(GetVersionsRequest request, CancellationToken cancellationToken = default);
     Task<ResolveVersionResponse> ResolveVersionAsync(ResolveVersionRequest request, CancellationToken cancellationToken = default);
     Task<GetChangeLogResponse> GetChangeLogsAsync(GetChangeLogRequest request, CancellationToken cancellationToken = default);
+    Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(JoinSharedBackupSetRequest request, CancellationToken cancellationToken = default);
+    Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(GetBackupSetMembersRequest request, CancellationToken cancellationToken = default);
 }

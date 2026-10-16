@@ -1,6 +1,7 @@
 using Backup.MetadataService.Data;
 using Backup.MetadataService.Entities;
 using Backup.Shared.DTOs;
+using Backup.Shared.Errors;
 using Backup.Shared.Messages;
 using Backup.Shared.Validation;
 using Microsoft.EntityFrameworkCore;
@@ -104,27 +105,107 @@ public class MetadataApplicationService : IMetadataApplicationService
             return new CreateBackupSetResponse { Success = false, ErrorMessage = $"Client with ID {request.ClientId} was not found." };
         }
 
+        string accessMode = request.AccessMode == BackupSetAccessMode.Shared ? "SHARED" : "PRIVATE";
+        string? shareCode = null;
+
+        if (request.AccessMode == BackupSetAccessMode.Shared)
+        {
+            // Try generating a unique share code with up to 10 attempts
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                string candidate = ShareCodeHelper.Generate();
+                bool exists = await dbContext.BackupSets.AnyAsync(bs => bs.ShareCode == candidate, cancellationToken);
+                if (!exists)
+                {
+                    shareCode = candidate;
+                    break;
+                }
+            }
+
+            if (shareCode == null)
+            {
+                return new CreateBackupSetResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Failed to generate a unique share code after multiple attempts. Please try again."
+                };
+            }
+        }
+
         var backupSet = new BackupSetEntity
         {
             Id = Guid.NewGuid(),
             ClientId = request.ClientId,
             Name = request.Name.Trim(),
             LocalRootPath = string.IsNullOrWhiteSpace(request.LocalRootPath) ? "/" : request.LocalRootPath.Trim(),
+            AccessMode = accessMode,
+            ShareCode = shareCode,
             CreatedAtUtc = DateTime.UtcNow,
             IsActive = true
         };
 
+        var ownerMember = new BackupSetMemberEntity
+        {
+            BackupSetId = backupSet.Id,
+            ClientId = request.ClientId,
+            Role = "OWNER",
+            JoinedAtUtc = DateTime.UtcNow,
+            LastSeenAtUtc = DateTime.UtcNow
+        };
+
         dbContext.BackupSets.Add(backupSet);
+        dbContext.BackupSetMembers.Add(ownerMember);
         await dbContext.SaveChangesAsync(cancellationToken);
-        _logger.LogInformation("[MetadataService] Created BackupSet {BackupSetId} ('{Name}') for Client {ClientId}", backupSet.Id, backupSet.Name, request.ClientId);
+        _logger.LogInformation("[MetadataService] Created BackupSet {BackupSetId} ('{Name}', Mode: {Mode}, Code: {Code}) for Client {ClientId}",
+            backupSet.Id, backupSet.Name, backupSet.AccessMode, backupSet.ShareCode, request.ClientId);
 
         return new CreateBackupSetResponse
         {
             BackupSetId = backupSet.Id,
             Name = backupSet.Name,
             LocalRootPath = backupSet.LocalRootPath,
+            AccessMode = request.AccessMode,
+            ShareCode = backupSet.ShareCode,
             Success = true
         };
+    }
+
+    private async Task<(bool Allowed, string? ErrorCode, string? ErrorMessage, BackupSetEntity? BackupSet)>
+        EnsureBackupSetAccessAsync(MetadataDbContext dbContext, Guid backupSetId, Guid? clientId, CancellationToken cancellationToken)
+    {
+        var backupSet = await dbContext.BackupSets
+            .Include(bs => bs.Members)
+            .FirstOrDefaultAsync(bs => bs.Id == backupSetId, cancellationToken);
+
+        if (backupSet == null)
+        {
+            return (false, "BACKUP_SET_NOT_FOUND", $"BackupSet {backupSetId} was not found.", null);
+        }
+
+        if (!clientId.HasValue || clientId.Value == Guid.Empty)
+        {
+            // For backward compatibility with internal/unauthenticated calls in older tests
+            return (true, null, null, backupSet);
+        }
+
+        Guid cid = clientId.Value;
+
+        // If caller is the recorded owner, access is always granted
+        if (backupSet.ClientId == cid)
+        {
+            return (true, null, null, backupSet);
+        }
+
+        // Check membership table
+        var member = backupSet.Members.FirstOrDefault(m => m.ClientId == cid)
+            ?? await dbContext.BackupSetMembers.FirstOrDefaultAsync(m => m.BackupSetId == backupSetId && m.ClientId == cid, cancellationToken);
+
+        if (member != null)
+        {
+            return (true, null, null, backupSet);
+        }
+
+        return (false, "ACCESS_DENIED", $"Client {cid} does not have access to BackupSet {backupSetId}.", backupSet);
     }
 
     public async Task<PrepareVersionResponse> PrepareVersionAsync(PrepareVersionRequest request, CancellationToken cancellationToken = default)
@@ -146,11 +227,12 @@ public class MetadataApplicationService : IMetadataApplicationService
             return new PrepareVersionResponse { Success = false, ErrorMessage = "Sha256 hash must be provided." };
         }
 
-        var backupSet = await dbContext.BackupSets.FindAsync([request.BackupSetId], cancellationToken);
-        if (backupSet == null)
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId ?? request.ActorClientId, cancellationToken);
+        if (!access.Allowed)
         {
-            return new PrepareVersionResponse { Success = false, ErrorMessage = $"BackupSet {request.BackupSetId} was not found." };
+            return new PrepareVersionResponse { Success = false, ErrorCode = access.ErrorCode, ErrorMessage = access.ErrorMessage };
         }
+        var backupSet = access.BackupSet!;
 
         // 1. Find existing file record
         var file = await dbContext.Files.FirstOrDefaultAsync(
@@ -216,6 +298,7 @@ public class MetadataApplicationService : IMetadataApplicationService
             ExpectedSize = request.Size,
             ExpectedSha256 = request.Sha256.Trim(),
             OperationKind = request.ChangeOrigin == BackupChangeOrigin.Restore ? "RESTORE" : "NORMAL",
+            ActorClientId = request.ActorClientId ?? request.ClientId,
             CreatedAtUtc = DateTime.UtcNow,
             ExpiresAtUtc = DateTime.UtcNow.AddMinutes(30)
         };
@@ -368,6 +451,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 Details = string.Equals(pending.OperationKind, "RESTORE", StringComparison.OrdinalIgnoreCase)
                     ? $"Restored version {pending.ExpectedVersionNumber} with Sha256 {request.ActualSha256}"
                     : $"Version {pending.ExpectedVersionNumber} committed with Sha256 {request.ActualSha256}",
+                ActorClientId = request.ActorClientId ?? pending.ActorClientId ?? file.BackupSet.ClientId,
                 CreatedAtUtc = DateTime.UtcNow
             };
             dbContext.ChangeLogs.Add(changeLog);
@@ -410,6 +494,12 @@ public class MetadataApplicationService : IMetadataApplicationService
             return new DeleteFileMetadataResponse { Success = false, ErrorMessage = pathError };
         }
 
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId ?? request.ActorClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new DeleteFileMetadataResponse { Success = false, ErrorCode = access.ErrorCode, ErrorMessage = access.ErrorMessage };
+        }
+
         var file = await dbContext.Files
             .Include(f => f.BackupSet)
             .FirstOrDefaultAsync(f => f.BackupSetId == request.BackupSetId && f.RelativePath == normalizedPath, cancellationToken);
@@ -440,6 +530,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 Action = "DELETE",
                 Status = "COMMITTED",
                 Details = $"File '{normalizedPath}' marked as deleted",
+                ActorClientId = request.ActorClientId ?? request.ClientId ?? file.BackupSet.ClientId,
                 CreatedAtUtc = DateTime.UtcNow
             };
             dbContext.ChangeLogs.Add(changeLog);
@@ -476,6 +567,12 @@ public class MetadataApplicationService : IMetadataApplicationService
         if (oldNormalized == newNormalized)
         {
             return new RenameFileMetadataResponse { Success = true };
+        }
+
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId ?? request.ActorClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new RenameFileMetadataResponse { Success = false, ErrorCode = access.ErrorCode, ErrorMessage = access.ErrorMessage };
         }
 
         // Check if destination path already exists and is active
@@ -527,6 +624,7 @@ public class MetadataApplicationService : IMetadataApplicationService
                 Action = "RENAME",
                 Status = "COMMITTED",
                 Details = $"Renamed from '{oldNormalized}' to '{newNormalized}'",
+                ActorClientId = request.ActorClientId ?? request.ClientId ?? sourceFile.BackupSet.ClientId,
                 CreatedAtUtc = DateTime.UtcNow
             };
             dbContext.ChangeLogs.Add(changeLog);
@@ -549,6 +647,18 @@ public class MetadataApplicationService : IMetadataApplicationService
     public async Task<GetFilesResponse> GetFilesAsync(GetFilesRequest request, CancellationToken cancellationToken = default)
     {
         await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new GetFilesResponse
+            {
+                BackupSetId = request.BackupSetId,
+                Success = false,
+                ErrorCode = access.ErrorCode ?? "ACCESS_DENIED",
+                ErrorMessage = access.ErrorMessage
+            };
+        }
 
         var query = dbContext.Files.Where(f => f.BackupSetId == request.BackupSetId);
         if (!request.IncludeDeleted)
@@ -588,6 +698,33 @@ public class MetadataApplicationService : IMetadataApplicationService
     {
         await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
 
+        var file = await dbContext.Files
+            .AsNoTracking()
+            .FirstOrDefaultAsync(f => f.Id == request.FileId, cancellationToken);
+
+        if (file == null)
+        {
+            return new GetVersionsResponse
+            {
+                FileId = request.FileId,
+                Success = false,
+                ErrorCode = "FILE_NOT_FOUND",
+                ErrorMessage = $"File {request.FileId} not found."
+            };
+        }
+
+        var access = await EnsureBackupSetAccessAsync(dbContext, file.BackupSetId, request.ClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new GetVersionsResponse
+            {
+                FileId = request.FileId,
+                Success = false,
+                ErrorCode = access.ErrorCode ?? "ACCESS_DENIED",
+                ErrorMessage = access.ErrorMessage
+            };
+        }
+
         var versions = await dbContext.FileVersions
             .Where(fv => fv.FileId == request.FileId)
             .OrderByDescending(fv => fv.VersionNumber)
@@ -625,6 +762,19 @@ public class MetadataApplicationService : IMetadataApplicationService
                 Success = false,
                 ErrorCode = "FILE_NOT_FOUND",
                 ErrorMessage = $"File {request.FileId} not found."
+            };
+        }
+
+        var access = await EnsureBackupSetAccessAsync(dbContext, file.BackupSetId, request.ClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new ResolveVersionResponse
+            {
+                FileId = request.FileId,
+                BackupSetId = file.BackupSetId,
+                Success = false,
+                ErrorCode = access.ErrorCode ?? "ACCESS_DENIED",
+                ErrorMessage = access.ErrorMessage
             };
         }
 
@@ -681,9 +831,22 @@ public class MetadataApplicationService : IMetadataApplicationService
     {
         await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
 
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new GetChangeLogResponse
+            {
+                BackupSetId = request.BackupSetId,
+                Success = false,
+                ErrorCode = access.ErrorCode ?? "ACCESS_DENIED",
+                ErrorMessage = access.ErrorMessage
+            };
+        }
+
         int limit = Math.Clamp(request.Limit, 1, 500);
         var entries = await dbContext.ChangeLogs
             .Include(cl => cl.File)
+            .Include(cl => cl.ActorClient)
             .Where(cl => cl.BackupSetId == request.BackupSetId)
             .OrderByDescending(cl => cl.CreatedAtUtc)
             .Take(limit)
@@ -696,7 +859,9 @@ public class MetadataApplicationService : IMetadataApplicationService
                 Action = cl.Action,
                 Status = cl.Status,
                 Details = cl.Details,
-                CreatedAtUtc = cl.CreatedAtUtc
+                CreatedAtUtc = cl.CreatedAtUtc,
+                ActorClientId = cl.ActorClientId,
+                ActorClientName = cl.ActorClient != null ? cl.ActorClient.Name : null
             })
             .ToListAsync(cancellationToken);
 
@@ -704,6 +869,142 @@ public class MetadataApplicationService : IMetadataApplicationService
         {
             BackupSetId = request.BackupSetId,
             Entries = entries,
+            Success = true
+        };
+    }
+
+    public async Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(JoinSharedBackupSetRequest request, CancellationToken cancellationToken = default)
+    {
+        await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        if (!request.ClientId.HasValue || request.ClientId.Value == Guid.Empty)
+        {
+            return new JoinSharedBackupSetResponse
+            {
+                Success = false,
+                ErrorCode = "CLIENT_NOT_REGISTERED",
+                ErrorMessage = "Client must be registered before joining a shared backup set."
+            };
+        }
+
+        if (!ShareCodeHelper.TryNormalize(request.ShareCode, out var normalizedCode, out var codeError))
+        {
+            return new JoinSharedBackupSetResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.InvalidShareCode,
+                ErrorMessage = codeError ?? "Invalid share code format."
+            };
+        }
+
+        var backupSet = await dbContext.BackupSets
+            .Include(bs => bs.Members)
+            .FirstOrDefaultAsync(bs => bs.ShareCode == normalizedCode, cancellationToken);
+
+        if (backupSet == null)
+        {
+            return new JoinSharedBackupSetResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.BackupSetNotFound,
+                ErrorMessage = $"Shared backup set with code '{normalizedCode}' was not found."
+            };
+        }
+
+        if (!string.Equals(backupSet.AccessMode, "SHARED", StringComparison.OrdinalIgnoreCase))
+        {
+            return new JoinSharedBackupSetResponse
+            {
+                Success = false,
+                ErrorCode = BackupErrorCodes.NotShared,
+                ErrorMessage = "The specified backup set is not in SHARED access mode."
+            };
+        }
+
+        Guid clientId = request.ClientId.Value;
+        var client = await dbContext.Clients.FindAsync([clientId], cancellationToken);
+        if (client == null)
+        {
+            return new JoinSharedBackupSetResponse
+            {
+                Success = false,
+                ErrorCode = "CLIENT_NOT_REGISTERED",
+                ErrorMessage = $"Client {clientId} was not found."
+            };
+        }
+
+        var existingMember = backupSet.Members.FirstOrDefault(m => m.ClientId == clientId)
+            ?? await dbContext.BackupSetMembers.FirstOrDefaultAsync(m => m.BackupSetId == backupSet.Id && m.ClientId == clientId, cancellationToken);
+
+        if (existingMember == null)
+        {
+            var newMember = new BackupSetMemberEntity
+            {
+                BackupSetId = backupSet.Id,
+                ClientId = clientId,
+                Role = "MEMBER",
+                JoinedAtUtc = DateTime.UtcNow,
+                LastSeenAtUtc = DateTime.UtcNow
+            };
+            dbContext.BackupSetMembers.Add(newMember);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("[MetadataService] Added Client {ClientId} ('{Name}') as MEMBER to Shared BackupSet {BackupSetId} ('{SetName}')",
+                clientId, client.Name, backupSet.Id, backupSet.Name);
+        }
+        else
+        {
+            existingMember.LastSeenAtUtc = DateTime.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("[MetadataService] Client {ClientId} is already member of Shared BackupSet {BackupSetId}. Returning idempotent success.",
+                clientId, backupSet.Id);
+        }
+
+        return new JoinSharedBackupSetResponse
+        {
+            Success = true,
+            BackupSetId = backupSet.Id,
+            Name = backupSet.Name,
+            AccessMode = BackupSetAccessMode.Shared,
+            OwnerClientId = backupSet.ClientId,
+            ShareCode = backupSet.ShareCode
+        };
+    }
+
+    public async Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(GetBackupSetMembersRequest request, CancellationToken cancellationToken = default)
+    {
+        await using var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+
+        var access = await EnsureBackupSetAccessAsync(dbContext, request.BackupSetId, request.ClientId, cancellationToken);
+        if (!access.Allowed)
+        {
+            return new GetBackupSetMembersResponse
+            {
+                BackupSetId = request.BackupSetId,
+                Success = false,
+                ErrorCode = access.ErrorCode ?? "ACCESS_DENIED",
+                ErrorMessage = access.ErrorMessage
+            };
+        }
+
+        var members = await dbContext.BackupSetMembers
+            .Include(m => m.Client)
+            .Where(m => m.BackupSetId == request.BackupSetId)
+            .OrderBy(m => m.JoinedAtUtc)
+            .Select(m => new BackupSetMemberDto
+            {
+                ClientId = m.ClientId,
+                ClientName = m.Client.Name,
+                MachineName = m.Client.MachineName,
+                Role = m.Role,
+                JoinedAtUtc = m.JoinedAtUtc,
+                LastSeenAtUtc = m.LastSeenAtUtc
+            })
+            .ToListAsync(cancellationToken);
+
+        return new GetBackupSetMembersResponse
+        {
+            BackupSetId = request.BackupSetId,
+            Members = members,
             Success = true
         };
     }

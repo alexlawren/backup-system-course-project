@@ -7,6 +7,8 @@ public class PrepareVersionRequest
     public long Size { get; set; }
     public string Sha256 { get; set; } = string.Empty;
     public BackupChangeOrigin ChangeOrigin { get; set; } = BackupChangeOrigin.Normal;
+    public Guid? ActorClientId { get; set; }
+    public Guid? ClientId { get; set; }
 }
 
 public class PrepareVersionResponse
@@ -17,5 +19,6 @@ public class PrepareVersionResponse
     public Guid ClientId { get; set; }
     public int ExpectedVersionNumber { get; set; }
     public bool Success { get; set; } = true;
+    public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
 }

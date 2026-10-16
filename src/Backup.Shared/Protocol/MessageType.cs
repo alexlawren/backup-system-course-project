@@ -57,5 +57,11 @@ public enum MessageType
     StoreFileResult,
     GetStoredFile,
     GetStoredFileResult,
-    StoredFile
+    StoredFile,
+
+    // Shared storage & membership operations
+    JoinSharedBackupSet,
+    JoinSharedBackupSetResult,
+    GetBackupSetMembers,
+    GetBackupSetMembersResult
 }

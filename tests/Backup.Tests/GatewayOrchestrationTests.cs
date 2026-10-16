@@ -840,6 +840,23 @@ internal class FakeMetadataServiceClient : IMetadataServiceClient
             : Task.FromResult(new GetChangeLogResponse { Success = true, BackupSetId = request.BackupSetId });
     }
 
+    public Func<JoinSharedBackupSetRequest, Task<JoinSharedBackupSetResponse>>? JoinSharedBackupSetFunc { get; set; }
+    public Func<GetBackupSetMembersRequest, Task<GetBackupSetMembersResponse>>? GetBackupSetMembersFunc { get; set; }
+
+    public Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(JoinSharedBackupSetRequest request, CancellationToken cancellationToken = default)
+    {
+        return JoinSharedBackupSetFunc != null
+            ? JoinSharedBackupSetFunc(request)
+            : Task.FromResult(new JoinSharedBackupSetResponse { Success = true, BackupSetId = Guid.NewGuid(), AccessMode = BackupSetAccessMode.Shared });
+    }
+
+    public Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(GetBackupSetMembersRequest request, CancellationToken cancellationToken = default)
+    {
+        return GetBackupSetMembersFunc != null
+            ? GetBackupSetMembersFunc(request)
+            : Task.FromResult(new GetBackupSetMembersResponse { Success = true, BackupSetId = request.BackupSetId });
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 

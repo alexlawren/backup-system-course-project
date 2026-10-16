@@ -8,6 +8,7 @@ public class PendingFileOperationEntity
     public long ExpectedSize { get; set; }
     public string ExpectedSha256 { get; set; } = string.Empty;
     public string OperationKind { get; set; } = "NORMAL";
+    public Guid? ActorClientId { get; set; }
     public DateTime CreatedAtUtc { get; set; }
     public DateTime ExpiresAtUtc { get; set; }
 

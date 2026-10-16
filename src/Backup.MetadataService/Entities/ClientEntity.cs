@@ -10,4 +10,5 @@ public class ClientEntity
 
     public ICollection<BackupSetEntity> BackupSets { get; set; } = new List<BackupSetEntity>();
     public ICollection<ChangeLogEntity> ChangeLogs { get; set; } = new List<ChangeLogEntity>();
+    public ICollection<BackupSetMemberEntity> Memberships { get; set; } = new List<BackupSetMemberEntity>();
 }

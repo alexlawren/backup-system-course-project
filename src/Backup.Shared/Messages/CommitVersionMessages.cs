@@ -6,6 +6,7 @@ public class CommitVersionRequest
     public string? StorageKey { get; set; }
     public long ActualSize { get; set; }
     public string ActualSha256 { get; set; } = string.Empty;
+    public Guid? ActorClientId { get; set; }
 }
 
 public class CommitVersionResponse

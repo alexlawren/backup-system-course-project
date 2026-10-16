@@ -15,4 +15,8 @@ public static class BackupErrorCodes
     public const string SizeMismatch = "SIZE_MISMATCH";
     public const string HashMismatch = "HASH_MISMATCH";
     public const string StorageConflict = "STORAGE_CONFLICT";
+    public const string AccessDenied = "ACCESS_DENIED";
+    public const string InvalidShareCode = "INVALID_SHARE_CODE";
+    public const string NotShared = "NOT_SHARED";
+    public const string InvalidInput = "INVALID_INPUT";
 }

@@ -119,6 +119,14 @@ public class GatewaySessionHandler : IAsyncDisposable
                 await HandleRestoreCompletedAsync(stream, header, cancellationToken);
                 break;
 
+            case MessageType.JoinSharedBackupSet:
+                await HandleJoinSharedBackupSetAsync(stream, header, cancellationToken);
+                break;
+
+            case MessageType.GetBackupSetMembers:
+                await HandleGetBackupSetMembersAsync(stream, header, cancellationToken);
+                break;
+
             default:
                 _logger.LogWarning("[SyncGateway] Unhandled MessageType: {MessageType}", header.MessageType);
                 if (header.BodyLength > 0)
@@ -212,6 +220,11 @@ public class GatewaySessionHandler : IAsyncDisposable
             return;
         }
 
+        if (_session.ClientId.HasValue && (req.ClientId == Guid.Empty || req.ClientId != _session.ClientId.Value))
+        {
+            req.ClientId = _session.ClientId.Value;
+        }
+
         try
         {
             var result = await _metadataClient.CreateBackupSetAsync(req, cancellationToken);
@@ -296,7 +309,9 @@ public class GatewaySessionHandler : IAsyncDisposable
                 RelativePath = normalizedPath,
                 Size = request.Size,
                 Sha256 = normalizedSha,
-                ChangeOrigin = request.ChangeOrigin
+                ChangeOrigin = request.ChangeOrigin,
+                ActorClientId = _session.ClientId ?? request.ClientId,
+                ClientId = _session.ClientId ?? request.ClientId
             }, cancellationToken);
         }
         catch (Exception ex)
@@ -319,7 +334,7 @@ public class GatewaySessionHandler : IAsyncDisposable
                 new UploadCompletedResponse
                 {
                     Success = false,
-                    ErrorCode = "PREPARE_REJECTED",
+                    ErrorCode = prepareResp.ErrorCode ?? "PREPARE_REJECTED",
                     ErrorMessage = prepareResp.ErrorMessage ?? "PrepareVersion rejected by metadata service."
                 },
                 correlationId: header.MessageId, cancellationToken: cancellationToken);
@@ -356,7 +371,8 @@ public class GatewaySessionHandler : IAsyncDisposable
             VersionNumber = prepareResp.ExpectedVersionNumber,
             ExpectedSize = request.Size,
             ExpectedSha256 = normalizedSha,
-            PrepareMessageId = header.MessageId
+            PrepareMessageId = header.MessageId,
+            ActorClientId = _session.ClientId ?? request.ClientId
         };
 
         // Respond with UploadRequired
@@ -476,7 +492,8 @@ public class GatewaySessionHandler : IAsyncDisposable
             OperationId = activeOp.OperationId,
             StorageKey = storeResult.StorageKey,
             ActualSize = storeResult.ActualSize,
-            ActualSha256 = storeResult.ActualSha256 ?? activeOp.ExpectedSha256
+            ActualSha256 = storeResult.ActualSha256 ?? activeOp.ExpectedSha256,
+            ActorClientId = activeOp.ActorClientId
         };
 
         var commitResponse = await CommitWithRetryAsync(commitRequest, cancellationToken);
@@ -700,7 +717,9 @@ public class GatewaySessionHandler : IAsyncDisposable
             var delResp = await _metadataClient.DeleteFileMetadataAsync(new DeleteFileMetadataRequest
             {
                 BackupSetId = request.BackupSetId,
-                RelativePath = normalizedPath
+                RelativePath = normalizedPath,
+                ClientId = _session.ClientId ?? request.ClientId,
+                ActorClientId = _session.ClientId ?? request.ClientId
             }, cancellationToken);
 
             var response = new FileDeletedResponse
@@ -762,7 +781,9 @@ public class GatewaySessionHandler : IAsyncDisposable
             {
                 BackupSetId = request.BackupSetId,
                 OldRelativePath = oldNormalized,
-                NewRelativePath = newNormalized
+                NewRelativePath = newNormalized,
+                ClientId = _session.ClientId ?? request.ClientId,
+                ActorClientId = _session.ClientId ?? request.ClientId
             }, cancellationToken);
 
             var response = new FileRenamedResponse
@@ -910,7 +931,8 @@ public class GatewaySessionHandler : IAsyncDisposable
             resolveResp = await _metadataClient.ResolveVersionAsync(new ResolveVersionRequest
             {
                 FileId = request.FileId,
-                VersionNumber = request.VersionNumber
+                VersionNumber = request.VersionNumber,
+                ClientId = _session.ClientId ?? request.ClientId
             }, cancellationToken);
         }
         catch (Exception ex)
@@ -1023,6 +1045,74 @@ public class GatewaySessionHandler : IAsyncDisposable
         await _writer.WriteJsonFrameAsync(stream, MessageType.RestoreCompleted,
             new RestoreCompletedResponse { Success = true },
             correlationId: header.MessageId, cancellationToken: cancellationToken);
+    }
+
+    private async Task HandleJoinSharedBackupSetAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<JoinSharedBackupSetRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.JoinSharedBackupSetResult,
+                new JoinSharedBackupSetResponse { Success = false, ErrorCode = BackupErrorCodes.InvalidInput, ErrorMessage = "Request body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (_session.ClientId.HasValue)
+        {
+            request.ClientId = _session.ClientId.Value;
+        }
+
+        if (!request.ClientId.HasValue || request.ClientId.Value == Guid.Empty)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.JoinSharedBackupSetResult,
+                new JoinSharedBackupSetResponse { Success = false, ErrorCode = "CLIENT_REQUIRED", ErrorMessage = "ClientId is required to join a shared backup set." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var result = await _metadataClient.JoinSharedBackupSetAsync(request, cancellationToken);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.JoinSharedBackupSetResult, result, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to join shared backup set via MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.JoinSharedBackupSetResult,
+                new JoinSharedBackupSetResponse { Success = false, ErrorCode = BackupErrorCodes.MetadataUnavailable, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+    }
+
+    private async Task HandleGetBackupSetMembersAsync(Stream stream, ProtocolHeader header, CancellationToken cancellationToken)
+    {
+        var request = await _reader.ReadJsonBodyAsync<GetBackupSetMembersRequest>(stream, header.BodyLength, cancellationToken);
+        if (request == null)
+        {
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetMembersResult,
+                new GetBackupSetMembersResponse { Success = false, ErrorCode = BackupErrorCodes.InvalidInput, ErrorMessage = "Request body cannot be null." },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+            return;
+        }
+
+        if (_session.ClientId.HasValue)
+        {
+            request.ClientId = _session.ClientId.Value;
+        }
+
+        try
+        {
+            var result = await _metadataClient.GetBackupSetMembersAsync(request, cancellationToken);
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetMembersResult, result, correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[SyncGateway] Failed to get backup set members from MetadataService");
+            await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetMembersResult,
+                new GetBackupSetMembersResponse { Success = false, ErrorCode = BackupErrorCodes.MetadataUnavailable, ErrorMessage = $"MetadataService unavailable [{BackupErrorCodes.MetadataUnavailable}]: {ex.Message}" },
+                correlationId: header.MessageId, cancellationToken: cancellationToken);
+        }
     }
 
     private static async Task DrainRemainingAsync(Stream stream, long remainingBytes, CancellationToken cancellationToken)

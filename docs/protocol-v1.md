@@ -118,6 +118,12 @@
 - `UploadRequired`: Ответ шлюза о необходимости физической загрузки (`UploadRequired: bool`, `OperationId`, `FileId`, `VersionNumber`).
 - `UploadCompleted`: Финальный ответ клиенту о завершении резервного копирования (`Success: bool`, `FileId`, `VersionNumber`, `StorageKey`, `AlreadyCommitted: bool`, `ErrorCode`, `ErrorMessage`).
 
+### Общие наборы и управление доступом (Shared Storage & Membership):
+- `JoinSharedBackupSet`: Запрос на присоединение рабочей станции к общему набору по коду доступа (`ShareCode`).
+- `JoinSharedBackupSetResult`: Результат присоединения (`Success`, `BackupSetId`, `Name`, `AccessMode`, `OwnerClientId`, `ShareCode`, `ErrorCode`, `ErrorMessage`).
+- `GetBackupSetMembers`: Запрос списка участников набора резервного копирования (`BackupSetId`).
+- `GetBackupSetMembersResult`: Список участников с их ролями (`BackupSetId`, `Members: List<BackupSetMemberDto>`, `Success`, `ErrorCode`, `ErrorMessage`).
+
 ---
 
 ## 5. Протокольный цикл сохранения и получения файлов
@@ -589,6 +595,72 @@ Client (Web)                     SyncGateway                 MetadataService    
 | `PATH_TRAVERSAL` | Попытка выхода за пределы корневого каталога или некорректный относительный путь | Shared Validator |
 | `HEADER_TOO_LARGE` | Длина JSON-заголовка превышает допустимый лимит 64 KiB | Shared Reader |
 | `CORRUPTED_MAGIC` | В начале кадра передан некорректный маркер, отличный от `BKP1` | Shared Reader |
+| `ACCESS_DENIED` | Клиент не является владельцем или участником набора | MetadataService |
+| `INVALID_SHARE_CODE` | Некорректный формат или символы в коде доступа | Shared Validator |
+| `NOT_SHARED` | Попытка подключения по коду к набору в режиме PRIVATE | MetadataService |
 
 ### 9.3. Неизменяемость физического фрейминга
 В рамках Release Fix #1 физический фрейминг Protocol v1 (сигнатура `BKP1`, порядок байт Big-Endian, 32-битный префикс `HeaderLength`, ограничение 64 KiB, потоковое тело `BodyLength`) **полностью сохранен без модификаций**. Ошибка рассинхронизации устранена на уровне управления сессией и жизненным циклом потока, без искусственного увеличения лимита заголовка и без расслабления проверок кадрирования. Protocol v1 остается строго последовательным протоколом без мультиплексирования.
+
+---
+
+## 10. Протокольные операции общего хранилища (Shared Storage Operations)
+
+### 10.1. Присоединение к общему набору (`JoinSharedBackupSet`)
+- **Запрос (`JoinSharedBackupSetRequest`):**
+  ```json
+  {
+    "shareCode": "7H4K-92QX",
+    "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  }
+  ```
+- **Ответ (`JoinSharedBackupSetResponse`):**
+  ```json
+  {
+    "success": true,
+    "backupSetId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "name": "SharedTeamVault",
+    "accessMode": "Shared",
+    "ownerClientId": "f0e1d2c3-b4a5-9687-8e7d-6c5b4a3f2e1d",
+    "shareCode": "7H4K-92QX",
+    "errorCode": null,
+    "errorMessage": null
+  }
+  ```
+- **Идемпотентность:** Повторный вызов `JoinSharedBackupSet` для клиента, уже являющегося участником, завершается успехом без дублирования записей в БД.
+
+### 10.2. Получение участников набора (`GetBackupSetMembers`)
+- **Запрос (`GetBackupSetMembersRequest`):**
+  ```json
+  {
+    "backupSetId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  }
+  ```
+- **Ответ (`GetBackupSetMembersResponse`):**
+  ```json
+  {
+    "backupSetId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "members": [
+      {
+        "clientId": "f0e1d2c3-b4a5-9687-8e7d-6c5b4a3f2e1d",
+        "clientName": "Workstation-A",
+        "machineName": "DESKTOP-LEAD",
+        "role": "OWNER",
+        "joinedAtUtc": "2026-10-16T10:00:00Z",
+        "lastSeenAtUtc": "2026-10-16T10:30:00Z"
+      },
+      {
+        "clientId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "clientName": "Workstation-B",
+        "machineName": "DESKTOP-DEV",
+        "role": "MEMBER",
+        "joinedAtUtc": "2026-10-16T10:15:00Z",
+        "lastSeenAtUtc": "2026-10-16T10:35:00Z"
+      }
+    ],
+    "success": true,
+    "errorCode": null,
+    "errorMessage": null
+  }
+  ```

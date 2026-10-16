@@ -15,6 +15,7 @@ public class MetadataDbContext : DbContext
     public DbSet<FileVersionEntity> FileVersions => Set<FileVersionEntity>();
     public DbSet<ChangeLogEntity> ChangeLogs => Set<ChangeLogEntity>();
     public DbSet<PendingFileOperationEntity> PendingFileOperations => Set<PendingFileOperationEntity>();
+    public DbSet<BackupSetMemberEntity> BackupSetMembers => Set<BackupSetMemberEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -40,6 +41,8 @@ public class MetadataDbContext : DbContext
             b.Property(bs => bs.LocalRootPath).IsRequired().HasMaxLength(1024);
             b.Property(bs => bs.CreatedAtUtc).IsRequired();
             b.Property(bs => bs.IsActive).IsRequired().HasDefaultValue(true);
+            b.Property(bs => bs.AccessMode).IsRequired().HasMaxLength(16).HasDefaultValue("PRIVATE");
+            b.Property(bs => bs.ShareCode).HasMaxLength(32);
 
             b.HasOne(bs => bs.Client)
                 .WithMany(c => c.BackupSets)
@@ -47,6 +50,7 @@ public class MetadataDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
 
             b.HasIndex(bs => bs.ClientId);
+            b.HasIndex(bs => bs.ShareCode).IsUnique();
         });
 
         // FileEntity
@@ -107,11 +111,17 @@ public class MetadataDbContext : DbContext
             b.Property(cl => cl.Status).IsRequired().HasMaxLength(64);
             b.Property(cl => cl.Details).HasMaxLength(2048);
             b.Property(cl => cl.CreatedAtUtc).IsRequired();
+            b.Property(cl => cl.ActorClientId);
 
             b.HasOne(cl => cl.Client)
                 .WithMany(c => c.ChangeLogs)
                 .HasForeignKey(cl => cl.ClientId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasOne(cl => cl.ActorClient)
+                .WithMany()
+                .HasForeignKey(cl => cl.ActorClientId)
+                .OnDelete(DeleteBehavior.SetNull);
 
             b.HasOne(cl => cl.BackupSet)
                 .WithMany(bs => bs.ChangeLogs)
@@ -124,6 +134,7 @@ public class MetadataDbContext : DbContext
                 .OnDelete(DeleteBehavior.SetNull);
 
             b.HasIndex(cl => cl.CreatedAtUtc);
+            b.HasIndex(cl => cl.ActorClientId);
         });
 
         // PendingFileOperationEntity
@@ -135,6 +146,7 @@ public class MetadataDbContext : DbContext
             b.Property(p => p.ExpectedSize).IsRequired();
             b.Property(p => p.ExpectedSha256).IsRequired().HasMaxLength(64);
             b.Property(p => p.OperationKind).IsRequired().HasMaxLength(32).HasDefaultValue("NORMAL");
+            b.Property(p => p.ActorClientId);
             b.Property(p => p.CreatedAtUtc).IsRequired();
             b.Property(p => p.ExpiresAtUtc).IsRequired();
 
@@ -144,6 +156,28 @@ public class MetadataDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
 
             b.HasIndex(p => p.ExpiresAtUtc);
+        });
+
+        // BackupSetMemberEntity
+        modelBuilder.Entity<BackupSetMemberEntity>(b =>
+        {
+            b.ToTable("backup_set_members");
+            b.HasKey(m => new { m.BackupSetId, m.ClientId });
+            b.Property(m => m.Role).IsRequired().HasMaxLength(32).HasDefaultValue("MEMBER");
+            b.Property(m => m.JoinedAtUtc).IsRequired();
+            b.Property(m => m.LastSeenAtUtc);
+
+            b.HasOne(m => m.BackupSet)
+                .WithMany(bs => bs.Members)
+                .HasForeignKey(m => m.BackupSetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasOne(m => m.Client)
+                .WithMany(c => c.Memberships)
+                .HasForeignKey(m => m.ClientId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasIndex(m => m.ClientId);
         });
     }
 }

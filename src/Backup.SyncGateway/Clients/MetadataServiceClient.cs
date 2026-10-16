@@ -158,6 +158,24 @@ public class MetadataServiceClient : IMetadataServiceClient
             cancellationToken);
     }
 
+    public async Task<JoinSharedBackupSetResponse> JoinSharedBackupSetAsync(JoinSharedBackupSetRequest request, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<JoinSharedBackupSetRequest, JoinSharedBackupSetResponse>(
+            MessageType.JoinSharedBackupSet,
+            MessageType.JoinSharedBackupSetResult,
+            request,
+            cancellationToken);
+    }
+
+    public async Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(GetBackupSetMembersRequest request, CancellationToken cancellationToken = default)
+    {
+        return await SendRequestAsync<GetBackupSetMembersRequest, GetBackupSetMembersResponse>(
+            MessageType.GetBackupSetMembers,
+            MessageType.GetBackupSetMembersResult,
+            request,
+            cancellationToken);
+    }
+
     private async Task<TResponse> SendRequestAsync<TRequest, TResponse>(
         MessageType requestType,
         MessageType expectedResponseType,

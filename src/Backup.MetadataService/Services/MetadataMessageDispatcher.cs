@@ -107,6 +107,18 @@ public class MetadataMessageDispatcher
                 await _writer.WriteJsonFrameAsync(stream, MessageType.ChangeLogResponse, clResp, correlationId: header.MessageId, cancellationToken: cancellationToken);
                 break;
 
+            case MessageType.JoinSharedBackupSet:
+                var joinReq = await _reader.ReadJsonBodyAsync<JoinSharedBackupSetRequest>(stream, header.BodyLength, cancellationToken);
+                var joinResp = await _appService.JoinSharedBackupSetAsync(joinReq ?? new(), cancellationToken);
+                await _writer.WriteJsonFrameAsync(stream, MessageType.JoinSharedBackupSetResult, joinResp, correlationId: header.MessageId, cancellationToken: cancellationToken);
+                break;
+
+            case MessageType.GetBackupSetMembers:
+                var memReq = await _reader.ReadJsonBodyAsync<GetBackupSetMembersRequest>(stream, header.BodyLength, cancellationToken);
+                var memResp = await _appService.GetBackupSetMembersAsync(memReq ?? new(), cancellationToken);
+                await _writer.WriteJsonFrameAsync(stream, MessageType.GetBackupSetMembersResult, memResp, correlationId: header.MessageId, cancellationToken: cancellationToken);
+                break;
+
             default:
                 _logger.LogWarning("[MetadataService] Unhandled MessageType: {MessageType}", header.MessageType);
                 if (header.BodyLength > 0)
