@@ -7,6 +7,7 @@
 @inject ISyncProfileService ProfileService
 @inject IJSRuntime JSRuntime
 @inject ILogger<Home> Logger
+@inject Microsoft.Extensions.Configuration.IConfiguration Configuration
 
 <PageTitle>Система резервного копирования</PageTitle>
 
@@ -167,7 +168,7 @@
 
         <div class="kv-row">
             <span class="kv-key">Файл состояния:</span>
-            <span class="kv-val mono">data/client/client-state.json</span>
+            <span class="kv-val mono">@GetStateDisplayPath()</span>
         </div>
     </div>
 
@@ -1016,5 +1017,22 @@
         {
             Logger.LogWarning("Clipboard copy error: {Message}", ex.Message);
         }
+    }
+
+    private string GetStateDisplayPath()
+    {
+        string? root = Configuration["ClientDataRoot"];
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return "data/client/client-state.json";
+        }
+
+        string normalized = root.Replace('\\', '/');
+        int idx = normalized.IndexOf("data/client", StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0)
+        {
+            return $"{normalized[idx..].TrimEnd('/')}/client-state.json";
+        }
+        return $"{normalized.TrimEnd('/')}/client-state.json";
     }
 }
