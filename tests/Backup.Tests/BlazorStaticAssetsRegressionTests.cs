@@ -145,10 +145,6 @@ public class BlazorStaticAssetsRegressionTests : IClassFixture<WebApplicationFac
     public async Task Live_PopulateSmokeFilesAndVerifyUiDetailsPage()
     {
         string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-        string clientStatePath = Path.Combine(repoRoot, "data", "client", "client-state.json");
-        string localRoot = Path.Combine(repoRoot, "data", "smoke_ui_test");
-        string testFilePath = Path.Combine(localRoot, "notes.txt");
-        string smokeFileIdPath = Path.Combine(repoRoot, "data", "client", "smoke-file-id.txt");
 
         using var handler = new HttpClientHandler();
         using var liveClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
@@ -159,42 +155,100 @@ public class BlazorStaticAssetsRegressionTests : IClassFixture<WebApplicationFac
         }
         catch { return; }
 
-        Directory.CreateDirectory(localRoot);
+        // Detect ClientDataRoot used by the live client on port 5100 (supports shared-demo and standard mode)
+        string clientDataDir = Path.Combine(repoRoot, "data", "client");
+        if (File.Exists(Path.Combine(repoRoot, "data", "client-a", "sync-profile.json")))
+        {
+            clientDataDir = Path.Combine(repoRoot, "data", "client-a");
+        }
+
+        var profileService = new SyncProfileService(clientDataDir);
+        var activeProfile = await profileService.GetProfileAsync();
+        if (activeProfile == null && clientDataDir != Path.Combine(repoRoot, "data", "client"))
+        {
+            clientDataDir = Path.Combine(repoRoot, "data", "client");
+            profileService = new SyncProfileService(clientDataDir);
+            activeProfile = await profileService.GetProfileAsync();
+        }
+
+        string clientStatePath = Path.Combine(clientDataDir, "client-state.json");
         var identityService = new ClientIdentityService(clientStatePath);
         var gatewayClient = new BackupGatewayClient("127.0.0.1", 5000);
         var clientService = new BackupClientService(gatewayClient, identityService);
 
         await clientService.EnsureRegisteredAsync();
-        var bs = await clientService.CreateBackupSetAsync("DemoProjectSet", localRoot);
-        if (!bs.Success) return;
 
-        var profileService = new SyncProfileService(Path.Combine(repoRoot, "data", "client"));
-        await profileService.SaveProfileAsync(new SyncProfile
+        Guid fileId;
+        if (activeProfile != null)
         {
-            BackupSetId = bs.BackupSetId,
-            Name = "DemoProjectSet",
-            LocalRootPath = localRoot,
-            AutomaticSyncEnabled = false
-        });
+            var filesResp = await clientService.GetFilesAsync(activeProfile.BackupSetId, includeDeleted: true);
+            var candidate = filesResp.Success && filesResp.Files != null
+                ? filesResp.Files.FirstOrDefault(f => f.CurrentVersionNumber >= 2)
+                : null;
 
-        // Backup v1
-        await File.WriteAllTextAsync(testFilePath, "Content Version 1");
-        var up1 = await clientService.BackupSingleFileAsync(bs.BackupSetId, localRoot, testFilePath);
-        Assert.True(up1.Success);
+            if (candidate != null)
+            {
+                fileId = candidate.FileId;
+            }
+            else
+            {
+                string localRoot = activeProfile.LocalRootPath;
+                Directory.CreateDirectory(localRoot);
+                string testFilePath = Path.Combine(localRoot, "smoke_ui_test_file.txt");
 
-        // Backup v2
-        await File.WriteAllTextAsync(testFilePath, "Content Version 2 (Modified)");
-        var up2 = await clientService.BackupSingleFileAsync(bs.BackupSetId, localRoot, testFilePath);
-        Assert.True(up2.Success);
+                await File.WriteAllTextAsync(testFilePath, "Smoke Details Version 1");
+                var up1 = await clientService.BackupSingleFileAsync(activeProfile.BackupSetId, localRoot, testFilePath);
+                Assert.True(up1.Success, $"Upload v1 failed: {up1.ErrorMessage}");
 
-        var fileId = up1.FileId!.Value;
-        await File.WriteAllTextAsync(smokeFileIdPath, fileId.ToString());
+                await File.WriteAllTextAsync(testFilePath, "Smoke Details Version 2 (Modified)");
+                var up2 = await clientService.BackupSingleFileAsync(activeProfile.BackupSetId, localRoot, testFilePath);
+                Assert.True(up2.Success, $"Upload v2 failed: {up2.ErrorMessage}");
 
-        // Test GET /files/{fileId}
+                fileId = up1.FileId!.Value;
+            }
+        }
+        else
+        {
+            string localRoot = Path.Combine(repoRoot, "data", "smoke_ui_test");
+            Directory.CreateDirectory(localRoot);
+            string testFilePath = Path.Combine(localRoot, "notes.txt");
+
+            var bs = await clientService.CreateBackupSetAsync("DemoProjectSet", localRoot);
+            if (!bs.Success) return;
+
+            await profileService.SaveProfileAsync(new SyncProfile
+            {
+                BackupSetId = bs.BackupSetId,
+                Name = "DemoProjectSet",
+                LocalRootPath = localRoot,
+                AutomaticSyncEnabled = false
+            });
+
+            await File.WriteAllTextAsync(testFilePath, "Content Version 1");
+            var up1 = await clientService.BackupSingleFileAsync(bs.BackupSetId, localRoot, testFilePath);
+            Assert.True(up1.Success, $"Upload v1 failed: {up1.ErrorMessage}");
+
+            await File.WriteAllTextAsync(testFilePath, "Content Version 2 (Modified)");
+            var up2 = await clientService.BackupSingleFileAsync(bs.BackupSetId, localRoot, testFilePath);
+            Assert.True(up2.Success, $"Upload v2 failed: {up2.ErrorMessage}");
+
+            fileId = up1.FileId!.Value;
+        }
+
+        // 1. Verify backend state directly via API/service
+        var verResp = await clientService.GetVersionsAsync(fileId);
+        Assert.True(verResp.Success, $"GetVersionsAsync failed: {verResp.ErrorMessage}");
+        Assert.NotNull(verResp.Versions);
+        Assert.True(verResp.Versions.Count >= 2, $"Expected >= 2 versions, found {verResp.Versions.Count}");
+        Assert.Contains(verResp.Versions, v => v.VersionNumber == 1);
+        Assert.Contains(verResp.Versions, v => v.VersionNumber == 2);
+
+        // 2. Verify Blazor Web UI FileDetails page renders properly with version history
         var fileDetailsResp = await liveClient.GetAsync($"http://127.0.0.1:5100/files/{fileId}");
         Assert.Equal(HttpStatusCode.OK, fileDetailsResp.StatusCode);
         string detailsHtml = await fileDetailsResp.Content.ReadAsStringAsync();
         Assert.DoesNotContain("v@", detailsHtml);
+        Assert.DoesNotContain("alert alert-danger", detailsHtml);
         Assert.Contains("v2", detailsHtml);
         Assert.Contains("v1", detailsHtml);
     }
