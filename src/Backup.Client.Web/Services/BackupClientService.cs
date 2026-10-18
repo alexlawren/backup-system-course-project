@@ -139,13 +139,24 @@ public class BackupClientService : IBackupClientService
 
     public async Task<GetBackupSetMembersResponse> GetBackupSetMembersAsync(Guid backupSetId, CancellationToken cancellationToken = default)
     {
-        var state = await _identityService.GetStateAsync(cancellationToken);
-        var req = new GetBackupSetMembersRequest
+        try
         {
-            BackupSetId = backupSetId,
-            ClientId = state.ClientId
-        };
-        return await _gatewayClient.GetBackupSetMembersAsync(req, cancellationToken);
+            var state = await _identityService.GetStateAsync(cancellationToken);
+            var req = new GetBackupSetMembersRequest
+            {
+                BackupSetId = backupSetId,
+                ClientId = state.ClientId
+            };
+            return await _gatewayClient.GetBackupSetMembersAsync(req, cancellationToken);
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or IOException or TimeoutException or OperationCanceledException)
+        {
+            return new GetBackupSetMembersResponse
+            {
+                Success = false,
+                ErrorMessage = "Не удалось загрузить участников набора: шлюз недоступен."
+            };
+        }
     }
 
     public async Task<UploadCompletedResponse> BackupSingleFileAsync(
@@ -226,28 +237,61 @@ public class BackupClientService : IBackupClientService
 
     public async Task<GetFilesResponse> GetFilesAsync(Guid backupSetId, bool includeDeleted = true, CancellationToken cancellationToken = default)
     {
-        return await _gatewayClient.GetFilesAsync(new GetFilesRequest
+        try
         {
-            BackupSetId = backupSetId,
-            IncludeDeleted = includeDeleted
-        }, cancellationToken);
+            return await _gatewayClient.GetFilesAsync(new GetFilesRequest
+            {
+                BackupSetId = backupSetId,
+                IncludeDeleted = includeDeleted
+            }, cancellationToken);
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or IOException or TimeoutException or OperationCanceledException)
+        {
+            return new GetFilesResponse
+            {
+                Success = false,
+                ErrorMessage = "Не удалось получить список файлов: шлюз недоступен."
+            };
+        }
     }
 
     public async Task<GetVersionsResponse> GetVersionsAsync(Guid fileId, CancellationToken cancellationToken = default)
     {
-        return await _gatewayClient.GetVersionsAsync(new GetVersionsRequest
+        try
         {
-            FileId = fileId
-        }, cancellationToken);
+            return await _gatewayClient.GetVersionsAsync(new GetVersionsRequest
+            {
+                FileId = fileId
+            }, cancellationToken);
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or IOException or TimeoutException or OperationCanceledException)
+        {
+            return new GetVersionsResponse
+            {
+                Success = false,
+                ErrorMessage = "Не удалось загрузить историю версий файла: шлюз недоступен."
+            };
+        }
     }
 
     public async Task<GetChangeLogResponse> GetChangeLogsAsync(Guid backupSetId, int limit = 100, CancellationToken cancellationToken = default)
     {
-        return await _gatewayClient.GetChangeLogAsync(new GetChangeLogRequest
+        try
         {
-            BackupSetId = backupSetId,
-            Limit = limit
-        }, cancellationToken);
+            return await _gatewayClient.GetChangeLogAsync(new GetChangeLogRequest
+            {
+                BackupSetId = backupSetId,
+                Limit = limit
+            }, cancellationToken);
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or IOException or TimeoutException or OperationCanceledException)
+        {
+            return new GetChangeLogResponse
+            {
+                Success = false,
+                ErrorMessage = "Не удалось загрузить журнал изменений: шлюз недоступен."
+            };
+        }
     }
 
     public async Task<RestoreExecutionResult> RestoreVersionAsync(Guid backupSetId, Guid fileId, int versionNumber, CancellationToken cancellationToken = default)

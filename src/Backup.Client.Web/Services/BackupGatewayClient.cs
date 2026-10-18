@@ -64,72 +64,151 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
     public bool IsConnected => _tcpClient != null && _tcpClient.Connected && _stream != null;
 
-    private async Task ConnectInternalAsync(CancellationToken cancellationToken = default)
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(2.5);
+    private DateTime _lastConnectFailureUtc = DateTime.MinValue;
+    private readonly object _reconnectLock = new();
+    private Task? _reconnectTask;
+    private CancellationTokenSource? _reconnectCts;
+
+    public bool IsReconnecting
     {
-        if (IsConnected && _stream != null)
+        get
         {
-            return;
-        }
-
-        MarkDisconnected();
-
-        bool wasConnected = _wasConnectedBefore;
-        Exception? lastEx = null;
-
-        for (int attempt = 0; attempt <= ReconnectBackoffs.Length; attempt++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
+            lock (_reconnectLock)
             {
-                _tcpClient = new TcpClient();
-                await _tcpClient.ConnectAsync(_host, _port, cancellationToken);
-                _stream = _tcpClient.GetStream();
+                return _reconnectTask != null && !_reconnectTask.IsCompleted;
+            }
+        }
+    }
 
-                if (_activeClientId.HasValue || wasConnected)
-                {
-                    var req = new HelloRequest
-                    {
-                        ClientName = _clientName,
-                        Version = "1.0",
-                        Role = "Client",
-                        MachineName = Environment.MachineName,
-                        ClientId = _activeClientId
-                    };
+    public int ActiveReconnectLoopCount
+    {
+        get
+        {
+            lock (_reconnectLock)
+            {
+                return (_reconnectTask != null && !_reconnectTask.IsCompleted) ? 1 : 0;
+            }
+        }
+    }
 
-                    await _writer.WriteJsonFrameAsync(_stream, MessageType.Hello, req, cancellationToken: cancellationToken);
-                    var respHeader = await _reader.ReadHeaderAsync(_stream, cancellationToken);
-                    if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
-                    {
-                        throw new ProtocolException($"Gateway handshake failed: unexpected response '{respHeader?.MessageType}'.");
-                    }
-                    if (respHeader.BodyLength > 0)
-                    {
-                        await _reader.ReadJsonBodyAsync<HelloResponse>(_stream, respHeader.BodyLength, cancellationToken);
-                    }
-                }
-
-                _wasConnectedBefore = true;
-
-                if (wasConnected)
-                {
-                    Reconnected?.Invoke();
-                }
-
+    public void EnsureBackgroundReconnectRunning()
+    {
+        lock (_reconnectLock)
+        {
+            if (_reconnectTask != null && !_reconnectTask.IsCompleted)
+            {
                 return;
             }
-            catch (Exception ex) when (ex is SocketException or IOException or TimeoutException or ProtocolException)
-            {
-                lastEx = ex;
-                MarkDisconnected();
 
-                if (attempt < ReconnectBackoffs.Length)
+            _reconnectCts?.Dispose();
+            _reconnectCts = new CancellationTokenSource();
+            var token = _reconnectCts.Token;
+            _reconnectTask = Task.Run(() => RunBackgroundReconnectLoopAsync(token));
+        }
+    }
+
+    private async Task RunBackgroundReconnectLoopAsync(CancellationToken cancellationToken)
+    {
+        int backoffIndex = 0;
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var delay = ReconnectBackoffs[Math.Min(backoffIndex, ReconnectBackoffs.Length - 1)];
+            try
+            {
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            if (cancellationToken.IsCancellationRequested || IsConnected)
+            {
+                break;
+            }
+
+            bool acquired = false;
+            try
+            {
+                acquired = await _connectionLock.WaitAsync(TimeSpan.FromMilliseconds(500), cancellationToken);
+                if (!acquired)
                 {
-                    await Task.Delay(ReconnectBackoffs[attempt], cancellationToken);
+                    continue;
+                }
+
+                if (IsConnected)
+                {
+                    break;
+                }
+
+                await ConnectSingleAttemptAsync(cancellationToken);
+                _wasConnectedBefore = true;
+                Reconnected?.Invoke();
+                break;
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or TimeoutException or ProtocolException or OperationCanceledException)
+            {
+                _lastConnectFailureUtc = DateTime.UtcNow;
+                MarkDisconnected();
+                backoffIndex = Math.Min(backoffIndex + 1, ReconnectBackoffs.Length - 1);
+            }
+            finally
+            {
+                if (acquired)
+                {
+                    _connectionLock.Release();
                 }
             }
         }
+    }
 
-        throw lastEx ?? new SocketException((int)SocketError.ConnectionRefused);
+    private async Task ConnectSingleAttemptAsync(CancellationToken cancellationToken = default)
+    {
+        MarkDisconnected();
+
+        _tcpClient = new TcpClient();
+        using var timeoutCts = new CancellationTokenSource(ConnectTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+        try
+        {
+            await _tcpClient.ConnectAsync(_host, _port, linkedCts.Token);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Connection to gateway at {_host}:{_port} timed out after {ConnectTimeout.TotalSeconds:F1}s.");
+        }
+
+        _stream = _tcpClient.GetStream();
+
+        if (_activeClientId.HasValue || _wasConnectedBefore)
+        {
+            var req = new HelloRequest
+            {
+                ClientName = _clientName,
+                Version = "1.0",
+                Role = "Client",
+                MachineName = Environment.MachineName,
+                ClientId = _activeClientId
+            };
+
+            await _writer.WriteJsonFrameAsync(_stream, MessageType.Hello, req, cancellationToken: linkedCts.Token);
+            var respHeader = await _reader.ReadHeaderAsync(_stream, linkedCts.Token);
+            if (respHeader == null || respHeader.MessageType != MessageType.HelloAck)
+            {
+                throw new ProtocolException($"Gateway handshake failed: unexpected response '{respHeader?.MessageType}'.");
+            }
+            if (respHeader.BodyLength > 0)
+            {
+                await _reader.ReadJsonBodyAsync<HelloResponse>(_stream, respHeader.BodyLength, linkedCts.Token);
+            }
+        }
+    }
+
+    private async Task ConnectInternalAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectedAsync(cancellationToken);
     }
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
@@ -137,7 +216,7 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         await _connectionLock.WaitAsync(cancellationToken);
         try
         {
-            await ConnectInternalAsync(cancellationToken);
+            await EnsureConnectedAsync(cancellationToken, force: true);
         }
         finally
         {
@@ -194,33 +273,42 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
 
     public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
     {
-        await _connectionLock.WaitAsync(cancellationToken);
         try
         {
-            await EnsureConnectedAsync(cancellationToken);
-            await _writer.WriteControlFrameAsync(_stream!, MessageType.Ping, cancellationToken: cancellationToken);
-            var respHeader = await _reader.ReadHeaderAsync(_stream!, cancellationToken);
-            if (respHeader == null)
-            {
-                MarkDisconnected();
-                return false;
-            }
+            using var pingTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, pingTimeoutCts.Token);
 
-            if (respHeader.BodyLength > 0)
+            await _connectionLock.WaitAsync(linkedCts.Token);
+            try
             {
-                await _reader.ReadBodyBytesAsync(_stream!, respHeader.BodyLength, cancellationToken);
-            }
+                await EnsureConnectedAsync(linkedCts.Token, force: true);
+                await _writer.WriteControlFrameAsync(_stream!, MessageType.Ping, cancellationToken: linkedCts.Token);
+                var respHeader = await _reader.ReadHeaderAsync(_stream!, linkedCts.Token);
+                if (respHeader == null)
+                {
+                    MarkDisconnected();
+                    EnsureBackgroundReconnectRunning();
+                    return false;
+                }
 
-            return respHeader.MessageType == MessageType.Pong;
+                if (respHeader.BodyLength > 0)
+                {
+                    await _reader.ReadBodyBytesAsync(_stream!, respHeader.BodyLength, linkedCts.Token);
+                }
+
+                return respHeader.MessageType == MessageType.Pong;
+            }
+            finally
+            {
+                _connectionLock.Release();
+            }
         }
         catch
         {
+            _lastConnectFailureUtc = DateTime.UtcNow;
             MarkDisconnected();
+            EnsureBackgroundReconnectRunning();
             return false;
-        }
-        finally
-        {
-            _connectionLock.Release();
         }
     }
 
@@ -1329,23 +1417,69 @@ public class BackupGatewayClient : IAsyncDisposable, IDisposable
         }
     }
 
-    private async Task EnsureConnectedAsync(CancellationToken cancellationToken)
+    private async Task EnsureConnectedAsync(CancellationToken cancellationToken, bool force = false)
     {
-        if (!IsConnected || _stream == null)
+        if (IsConnected && _stream != null)
         {
-            await ConnectInternalAsync(cancellationToken);
+            return;
+        }
+
+        if (!force && DateTime.UtcNow - _lastConnectFailureUtc < TimeSpan.FromSeconds(2.0))
+        {
+            EnsureBackgroundReconnectRunning();
+            throw new SocketException((int)SocketError.ConnectionRefused);
+        }
+
+        bool wasConnected = _wasConnectedBefore;
+        try
+        {
+            await ConnectSingleAttemptAsync(cancellationToken);
+            _wasConnectedBefore = true;
+            if (wasConnected)
+            {
+                Reconnected?.Invoke();
+            }
+        }
+        catch (Exception)
+        {
+            _lastConnectFailureUtc = DateTime.UtcNow;
+            MarkDisconnected();
+            EnsureBackgroundReconnectRunning();
+            throw;
         }
     }
 
     public void Dispose()
     {
         MarkDisconnected();
+        lock (_reconnectLock)
+        {
+            _reconnectCts?.Cancel();
+            _reconnectCts?.Dispose();
+            _reconnectCts = null;
+        }
         _connectionLock.Dispose();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        Dispose();
-        return ValueTask.CompletedTask;
+        MarkDisconnected();
+        Task? taskToWait = null;
+        lock (_reconnectLock)
+        {
+            _reconnectCts?.Cancel();
+            taskToWait = _reconnectTask;
+        }
+        if (taskToWait != null)
+        {
+            try { await taskToWait.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+        }
+        lock (_reconnectLock)
+        {
+            _reconnectCts?.Dispose();
+            _reconnectCts = null;
+            _reconnectTask = null;
+        }
+        _connectionLock.Dispose();
     }
 }

@@ -205,13 +205,13 @@ else
             }
             else
             {
-                errorMessage = response.ErrorMessage ?? "Не удалось загрузить журнал изменений.";
+                errorMessage = response.ErrorMessage ?? "Не удалось загрузить журнал изменений: шлюз недоступен.";
             }
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Ошибка загрузки журнала изменений");
-            errorMessage = "Ошибка обмена с сервером при получении журнала. Подробности записаны в журнал.";
+            errorMessage = "Не удалось загрузить журнал изменений: шлюз недоступен.";
         }
         finally
         {

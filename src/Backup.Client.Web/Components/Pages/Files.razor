@@ -180,13 +180,13 @@ else
             }
             else
             {
-                errorMessage = response.ErrorMessage ?? "Не удалось загрузить список файлов.";
+                errorMessage = response.ErrorMessage ?? "Не удалось получить список файлов: шлюз недоступен.";
             }
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Ошибка загрузки списка файлов");
-            errorMessage = "Ошибка обмена с сервером при загрузке файлов. Подробности записаны в журнал.";
+            errorMessage = "Не удалось получить список файлов: шлюз недоступен.";
         }
         finally
         {

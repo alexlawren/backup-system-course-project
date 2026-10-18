@@ -329,7 +329,7 @@ else if (fileMetadata != null)
             }
             else
             {
-                errorMessage = filesResp.ErrorMessage ?? "Не удалось загрузить данные файла со шлюза.";
+                errorMessage = filesResp.ErrorMessage ?? "Не удалось загрузить сведения о файле: шлюз недоступен.";
                 return;
             }
 
@@ -340,13 +340,13 @@ else if (fileMetadata != null)
             }
             else
             {
-                errorMessage = verResp.ErrorMessage ?? "Не удалось загрузить историю версий файла.";
+                errorMessage = verResp.ErrorMessage ?? "Не удалось загрузить историю версий файла: шлюз недоступен.";
             }
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Ошибка при загрузке сведений о файле {FileId}", FileId);
-            errorMessage = "Ошибка обмена с сервером при получении сведений о файле. Подробности записаны в журнал.";
+            errorMessage = "Не удалось загрузить сведения о файле: шлюз недоступен.";
         }
         finally
         {

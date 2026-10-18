@@ -36,7 +36,7 @@
             <span class="status-label">Шлюз</span>
             <span class="status-value">
                 <span class="status-dot @(isGatewayConnected ? "online" : "offline")"></span>
-                @(isGatewayConnected ? "Подключён" : "Недоступен")
+                @(isGatewayConnected ? "Подключён" : "Нет соединения")
             </span>
         </div>
 
@@ -552,10 +552,6 @@
                 activeLocalRootPath = profile.LocalRootPath;
                 activeAccessMode = profile.AccessMode;
                 activeShareCode = profile.ShareCode;
-                if (activeAccessMode == BackupSetAccessMode.Shared)
-                {
-                    await LoadMembersAsync();
-                }
             }
             else if (SyncEngine.ActiveProfile != null)
             {
@@ -564,14 +560,17 @@
                 activeLocalRootPath = SyncEngine.ActiveProfile.LocalRootPath;
                 activeAccessMode = SyncEngine.ActiveProfile.AccessMode;
                 activeShareCode = SyncEngine.ActiveProfile.ShareCode;
+            }
+
+            await CheckGatewayConnectionAsync();
+            if (isGatewayConnected)
+            {
                 if (activeAccessMode == BackupSetAccessMode.Shared)
                 {
                     await LoadMembersAsync();
                 }
+                await LoadTotalFilesCountAsync();
             }
-
-            await CheckGatewayConnectionAsync();
-            await LoadTotalFilesCountAsync();
         }
         catch (Exception ex)
         {
@@ -619,11 +618,14 @@
             activeAccessMode = BackupSetAccessMode.Shared;
         }
 
-        if (activeAccessMode == BackupSetAccessMode.Shared)
+        if (isGatewayConnected)
         {
-            await LoadMembersAsync();
+            if (activeAccessMode == BackupSetAccessMode.Shared)
+            {
+                await LoadMembersAsync();
+            }
+            await LoadTotalFilesCountAsync();
         }
-        await LoadTotalFilesCountAsync();
         StateHasChanged();
     }
 
@@ -841,7 +843,7 @@
 
     private async Task LoadMembersAsync()
     {
-        if (activeBackupSetId != Guid.Empty)
+        if (isGatewayConnected && activeBackupSetId != Guid.Empty)
         {
             try
             {
@@ -1090,20 +1092,20 @@
 
     private string GetReconciliationStatusText()
     {
-        if (!isGatewayConnected) return "Нет соединения";
         if (SyncEngine.HasConflict) return "Конфликт";
         if (SyncEngine.IsReconciling) return "Синхронизация...";
         if (SyncEngine.ReconciliationRequired) return "Требуется синхронизация";
+        if (!isGatewayConnected) return "Нет соединения";
         if (SyncEngine.LastSyncResult?.Contains("error", StringComparison.OrdinalIgnoreCase) == true) return "Ошибка";
         return "Синхронизировано";
     }
 
     private string GetReconciliationDotClass()
     {
-        if (!isGatewayConnected) return "offline";
         if (SyncEngine.HasConflict) return "offline";
         if (SyncEngine.IsReconciling) return "pending";
         if (SyncEngine.ReconciliationRequired) return "warning";
+        if (!isGatewayConnected) return "offline";
         if (SyncEngine.LastSyncResult?.Contains("error", StringComparison.OrdinalIgnoreCase) == true) return "warning";
         return "online";
     }

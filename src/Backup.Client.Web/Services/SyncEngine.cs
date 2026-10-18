@@ -172,6 +172,8 @@ public class SyncEngine : ISyncEngine
         }
     }
 
+    private DateTime _lastReconciliationFailureUtc = DateTime.MinValue;
+
     private void AddConflict(SharedSyncConflict conflict)
     {
         lock (_conflictsLock)
@@ -237,6 +239,7 @@ public class SyncEngine : ISyncEngine
     private void OnGatewayReconnected()
     {
         Log("[SyncEngine] Gateway connection re-established. Full reconciliation required.", "WARN");
+        _lastReconciliationFailureUtc = DateTime.MinValue;
         ReconciliationRequired = true;
         if (IsRunning && _activeProfile?.AccessMode == BackupSetAccessMode.Shared)
         {
@@ -655,6 +658,7 @@ public class SyncEngine : ISyncEngine
         }
         catch (Exception ex)
         {
+            _lastReconciliationFailureUtc = DateTime.UtcNow;
             ReconciliationRequired = true;
             LastSyncResult = $"Reconciliation error: {ex.Message}";
             Log($"[SyncEngine] Reconciliation error: {ex.Message}", "ERROR");
@@ -1496,6 +1500,7 @@ public class SyncEngine : ISyncEngine
         }
         catch (Exception ex)
         {
+            _lastReconciliationFailureUtc = DateTime.UtcNow;
             ReconciliationRequired = true;
             LastSyncResult = $"Shared reconciliation error: {ex.Message}";
             Log($"[SyncEngine] Shared reconciliation error: {ex.Message}", "ERROR");
@@ -1525,15 +1530,19 @@ public class SyncEngine : ISyncEngine
                 // 2. Check if full reconciliation was flagged by overflow/network issue
                 if (ReconciliationRequired)
                 {
-                    Log("[SyncEngine] ReconciliationRequired flag is set. Triggering reconciliation...", "WARN");
-                    await _syncLock.WaitAsync(cancellationToken);
-                    try
+                    bool canReconcile = _gatewayClient.IsConnected || (DateTime.UtcNow - _lastReconciliationFailureUtc >= TimeSpan.FromSeconds(5));
+                    if (canReconcile)
                     {
-                        await ExecuteReconciliationInternalAsync(cancellationToken);
-                    }
-                    finally
-                    {
-                        _syncLock.Release();
+                        Log("[SyncEngine] ReconciliationRequired flag is set. Triggering reconciliation...", "WARN");
+                        await _syncLock.WaitAsync(cancellationToken);
+                        try
+                        {
+                            await ExecuteReconciliationInternalAsync(cancellationToken);
+                        }
+                        finally
+                        {
+                            _syncLock.Release();
+                        }
                     }
                 }
 
@@ -2400,6 +2409,11 @@ public class SyncEngine : ISyncEngine
             if (_activeProfile == null || _activeProfile.AccessMode != BackupSetAccessMode.Shared || !IsRunning)
             {
                 break;
+            }
+
+            if (!_gatewayClient.IsConnected)
+            {
+                continue;
             }
 
             // Check if watcher events are pending in debounce queue; if so, skip this pass to avoid racing
