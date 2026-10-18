@@ -6,6 +6,7 @@
 @inject ISyncEngine SyncEngine
 @inject ISyncProfileService ProfileService
 @inject IJSRuntime JSRuntime
+@inject IClipboardService ClipboardService
 @inject ILogger<Home> Logger
 @inject Microsoft.Extensions.Configuration.IConfiguration Configuration
 
@@ -157,7 +158,7 @@
                 @if (clientState?.ClientId != null && clientState.ClientId != Guid.Empty)
                 {
                     <span title="@clientState.ClientId">@(clientState.ClientId.Value.ToString()[..8])...</span>
-                    <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; font-size: 0.75rem;" title="Копировать полный Client ID (@clientState.ClientId)" @onclick="() => CopyToClipboard(clientState.ClientId.Value.ToString())">Копировать</button>
+                    <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; font-size: 0.75rem;" title="Копировать полный Client ID (@clientState.ClientId)" @onclick="CopyClientIdAsync">@clientIdCopyBtnText</button>
                 }
                 else
                 {
@@ -264,7 +265,7 @@
                         <span class="kv-key">Код подключения:</span>
                         <span class="kv-val mono" style="font-size: 1.05rem; font-weight: 700; letter-spacing: 0.05em; color: var(--color-primary, #60a5fa); display: flex; align-items: center; gap: 0.5rem;">
                             <span>@activeShareCode</span>
-                            <button class="btn btn-secondary btn-sm" style="padding: 2px 8px;" @onclick="CopyShareCode">Копировать</button>
+                            <button class="btn btn-secondary btn-sm" style="padding: 2px 8px;" @onclick="CopyShareCodeAsync">@shareCodeCopyBtnText</button>
                         </span>
                     </div>
                 }
@@ -767,13 +768,66 @@
         }
     }
 
-    private void CopyShareCode()
+    private string shareCodeCopyBtnText = "Копировать";
+    private string clientIdCopyBtnText = "Копировать";
+    private CancellationTokenSource? _shareCodeFeedbackCts;
+    private CancellationTokenSource? _clientIdFeedbackCts;
+
+    private async Task CopyShareCodeAsync()
     {
-        if (!string.IsNullOrEmpty(activeShareCode))
+        if (string.IsNullOrWhiteSpace(activeShareCode)) return;
+        string cleanCode = activeShareCode.Trim();
+        bool success = await ClipboardService.CopyTextAsync(cleanCode);
+        if (success)
         {
-            backupSetMessage = $"Код подключения: {activeShareCode} скопирован в буфер/готов для использования.";
+            backupSetMessage = "Код скопирован";
             backupSetIsError = false;
+            shareCodeCopyBtnText = "Скопировано";
+            _shareCodeFeedbackCts?.Cancel();
+            _shareCodeFeedbackCts = new CancellationTokenSource();
+            var token = _shareCodeFeedbackCts.Token;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(1500, token);
+                    shareCodeCopyBtnText = "Копировать";
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (OperationCanceledException) { }
+            }, token);
         }
+        else
+        {
+            backupSetMessage = "Не удалось скопировать код";
+            backupSetIsError = true;
+        }
+        StateHasChanged();
+    }
+
+    private async Task CopyClientIdAsync()
+    {
+        if (clientState?.ClientId == null || clientState.ClientId == Guid.Empty) return;
+        string idStr = clientState.ClientId.Value.ToString();
+        bool success = await ClipboardService.CopyTextAsync(idStr);
+        if (success)
+        {
+            clientIdCopyBtnText = "Скопировано";
+            _clientIdFeedbackCts?.Cancel();
+            _clientIdFeedbackCts = new CancellationTokenSource();
+            var token = _clientIdFeedbackCts.Token;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(1500, token);
+                    clientIdCopyBtnText = "Копировать";
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (OperationCanceledException) { }
+            }, token);
+        }
+        StateHasChanged();
     }
 
     private async Task ToggleMembersViewAsync()
@@ -1067,14 +1121,7 @@
     private async Task CopyToClipboard(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
-        try
-        {
-            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", text);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogWarning("Clipboard copy error: {Message}", ex.Message);
-        }
+        await ClipboardService.CopyTextAsync(text.Trim());
     }
 
     private string GetStateDisplayPath()

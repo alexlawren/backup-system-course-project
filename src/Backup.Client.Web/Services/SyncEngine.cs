@@ -89,6 +89,7 @@ public class SyncEngine : ISyncEngine
 
     private readonly SemaphoreSlim _syncLock = new(1, 1);
     private readonly Dictionary<string, DebouncedFileEvent> _pendingEvents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTime> _recentRenameOldPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<SyncLogEntry> _recentEvents = new();
     private readonly object _logLock = new();
 
@@ -1283,13 +1284,83 @@ public class SyncEngine : ISyncEngine
 
             var conflictPaths = new HashSet<string>(ActiveConflicts.Select(c => c.RelativePath), StringComparer.OrdinalIgnoreCase);
 
+            // PHASE 6.0: Safe Local Rename Detection
+            // If an untracked local file has identical SHA-256 and size as an index entry whose file is missing on disk,
+            // and the server has not modified that entry, execute a server RENAME to preserve FileId and version history.
+            var candidateDeletedEntries = localIndex.Entries.Values
+                .Where(idx => !currentLocalFiles.ContainsKey(idx.RelativePath)
+                           && !currentLocalFiles.ContainsKey(idx.RelativePath.Replace('\\', '/'))
+                           && !conflictPaths.Contains(idx.RelativePath)
+                           && !string.IsNullOrEmpty(idx.LastSyncedSha256)
+                           && (manifestByPath.TryGetValue(idx.RelativePath, out var m) || manifestByPath.TryGetValue(idx.RelativePath.Replace('\\', '/'), out m))
+                           && !m.IsDeleted
+                           && m.CurrentVersionNumber == idx.LastSyncedServerVersion)
+                .ToList();
+
+            var handledUntrackedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var handledDeletedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (relPath, localFile) in currentLocalFiles)
+            {
+                if (conflictPaths.Contains(relPath)) continue;
+
+                bool isUntracked = !localIndex.Entries.ContainsKey(relPath)
+                                && !localIndex.Entries.ContainsKey(relPath.Replace('\\', '/'))
+                                && !manifestByPath.ContainsKey(relPath)
+                                && !manifestByPath.ContainsKey(relPath.Replace('\\', '/'));
+
+                if (isUntracked && !handledUntrackedPaths.Contains(relPath))
+                {
+                    var matchedOld = candidateDeletedEntries
+                        .FirstOrDefault(d => !handledDeletedPaths.Contains(d.RelativePath)
+                                          && d.Size == localFile.Size
+                                          && string.Equals(d.LastSyncedSha256, localFile.Sha256, StringComparison.OrdinalIgnoreCase));
+
+                    if (matchedOld != null)
+                    {
+                        string oldRel = matchedOld.RelativePath.Replace('\\', '/');
+                        string fullPath = Path.Combine(root, relPath);
+                        bool stable = await _stabilityHelper.WaitForFileStabilityAsync(fullPath, cancellationToken);
+                        if (stable)
+                        {
+                            var renResp = await _gatewayClient.RenameFileAsync(new FileRenamedRequest
+                            {
+                                ClientId = identity.ClientId ?? Guid.Empty,
+                                BackupSetId = backupSetId,
+                                OldRelativePath = oldRel,
+                                NewRelativePath = relPath
+                            }, cancellationToken);
+
+                            if (renResp.Success)
+                            {
+                                handledUntrackedPaths.Add(relPath);
+                                handledDeletedPaths.Add(matchedOld.RelativePath);
+                                handledDeletedPaths.Add(oldRel);
+
+                                localIndex.Entries.Remove(matchedOld.RelativePath);
+                                localIndex.Entries.Remove(oldRel);
+
+                                matchedOld.RelativePath = relPath;
+                                matchedOld.LastWriteTimeUtc = File.GetLastWriteTimeUtc(fullPath);
+                                if (renResp.FileId.HasValue)
+                                {
+                                    matchedOld.FileId = renResp.FileId;
+                                }
+                                localIndex.Entries[relPath] = matchedOld;
+                                Log($"[SyncEngine] Reconciled local rename: '{oldRel}' -> '{relPath}' (FileId: {matchedOld.FileId})");
+                            }
+                        }
+                    }
+                }
+            }
+
             foreach (var (relPath, localFile) in currentLocalFiles)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (conflictPaths.Contains(relPath))
+                if (conflictPaths.Contains(relPath) || handledUntrackedPaths.Contains(relPath))
                 {
-                    continue; // Skip conflicted files
+                    continue; // Skip conflicted files or already handled renames
                 }
 
                 bool isAlreadySynced = localIndex.Entries.TryGetValue(relPath, out var idx)
@@ -1361,7 +1432,8 @@ public class SyncEngine : ISyncEngine
             var locallyDeletedKeys = localIndex.Entries.Keys
                 .Where(k => !currentLocalFiles.ContainsKey(k)
                          && !currentLocalFiles.ContainsKey(k.Replace('\\', '/'))
-                         && !conflictPaths.Contains(k))
+                         && !conflictPaths.Contains(k)
+                         && !handledDeletedPaths.Contains(k))
                 .ToList();
 
             foreach (var delPath in locallyDeletedKeys)
@@ -1484,10 +1556,44 @@ public class SyncEngine : ISyncEngine
                 // 4. Process mature items
                 if (matureItems.Count > 0)
                 {
-                    foreach (var item in matureItems)
+                    string rootPath = _activeProfile?.LocalRootPath ?? string.Empty;
+
+                    // Correlate and filter out any Deleted items corresponding to Renamed old paths in this batch
+                    var renameOldKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var renItem in matureItems.Where(i => i.Kind == FileChangeKind.Renamed && !string.IsNullOrWhiteSpace(i.OldFullPath)))
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        await ProcessDebouncedItemAsync(item, cancellationToken);
+                        if (!string.IsNullOrEmpty(rootPath))
+                        {
+                            string oRel = Path.GetRelativePath(rootPath, renItem.OldFullPath!);
+                            if (ProtocolPathValidator.TryNormalizeAndValidate(oRel, out var nOld, out _))
+                            {
+                                renameOldKeys.Add(nOld);
+                            }
+                        }
+                    }
+
+                    if (renameOldKeys.Count > 0)
+                    {
+                        matureItems.RemoveAll(i => i.Kind == FileChangeKind.Deleted && renameOldKeys.Contains(i.Key));
+                    }
+
+                    // Prioritize Renamed events first (0), then Created/Changed (1), then Deleted last (2)
+                    matureItems = matureItems
+                        .OrderBy(e => e.Kind == FileChangeKind.Renamed ? 0 : (e.Kind == FileChangeKind.Deleted ? 2 : 1))
+                        .ToList();
+
+                    await _syncLock.WaitAsync(cancellationToken);
+                    try
+                    {
+                        foreach (var item in matureItems)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await ProcessDebouncedItemAsync(item, cancellationToken);
+                        }
+                    }
+                    finally
+                    {
+                        _syncLock.Release();
                     }
                 }
 
@@ -1567,14 +1673,54 @@ public class SyncEngine : ISyncEngine
             return;
         }
 
+        string? normOld = null;
+        if (!string.IsNullOrWhiteSpace(evt.OldFullPath))
+        {
+            string oldRel = Path.GetRelativePath(root, evt.OldFullPath);
+            if (ProtocolPathValidator.TryNormalizeAndValidate(oldRel, out var nOld, out _))
+            {
+                normOld = nOld;
+            }
+        }
+
         lock (_pendingEvents)
         {
+            var now = DateTime.UtcNow;
+
+            // Prune expired rename correlations (> 10s)
+            foreach (var key in _recentRenameOldPaths.Keys.ToList())
+            {
+                if (now - _recentRenameOldPaths[key] > TimeSpan.FromSeconds(10))
+                {
+                    _recentRenameOldPaths.Remove(key);
+                }
+            }
+
+            if (evt.Kind == FileChangeKind.Renamed && !string.IsNullOrEmpty(normOld))
+            {
+                _recentRenameOldPaths[normOld] = now;
+                // Discard any standalone deletion or change queued for the old path
+                _pendingEvents.Remove(normOld);
+            }
+            else if (evt.Kind == FileChangeKind.Deleted)
+            {
+                // Discard deletion event if it corresponds to an old path of a recent rename
+                if (_recentRenameOldPaths.TryGetValue(normRelative, out var renameTime) && (now - renameTime) < TimeSpan.FromSeconds(10))
+                {
+                    return;
+                }
+            }
+
             if (_pendingEvents.TryGetValue(normRelative, out var existing))
             {
-                existing.LastSeenUtc = DateTime.UtcNow;
+                existing.LastSeenUtc = now;
 
                 // Coalescing logic
-                if (existing.Kind == FileChangeKind.Created && evt.Kind == FileChangeKind.Changed)
+                if (existing.Kind == FileChangeKind.Renamed && (evt.Kind == FileChangeKind.Changed || evt.Kind == FileChangeKind.Created))
+                {
+                    // Keep as Renamed with its original OldFullPath; do not downgrade to Changed/Created!
+                }
+                else if (existing.Kind == FileChangeKind.Created && evt.Kind == FileChangeKind.Changed)
                 {
                     // Created + Changed -> stays Created
                 }
@@ -1587,14 +1733,13 @@ public class SyncEngine : ISyncEngine
                     // Created and then immediately deleted -> remove from pending completely
                     _pendingEvents.Remove(normRelative);
                 }
-                else if (existing.Kind == FileChangeKind.Renamed && evt.Kind == FileChangeKind.Changed)
-                {
-                    // Renamed + Changed -> keep as Renamed
-                }
                 else
                 {
                     existing.Kind = evt.Kind;
-                    existing.OldFullPath = evt.OldFullPath;
+                    if (!string.IsNullOrWhiteSpace(evt.OldFullPath))
+                    {
+                        existing.OldFullPath = evt.OldFullPath;
+                    }
                 }
             }
             else
@@ -1605,8 +1750,8 @@ public class SyncEngine : ISyncEngine
                     Kind = evt.Kind,
                     FullPath = fullPath,
                     OldFullPath = evt.OldFullPath,
-                    FirstSeenUtc = DateTime.UtcNow,
-                    LastSeenUtc = DateTime.UtcNow
+                    FirstSeenUtc = now,
+                    LastSeenUtc = now
                 };
             }
         }
@@ -1759,9 +1904,26 @@ public class SyncEngine : ISyncEngine
                     var index = await _indexService.LoadIndexAsync(backupSetId, cancellationToken);
 
                     // Check if old relative path is known in our index/state
-                    bool isKnownRename = !string.IsNullOrWhiteSpace(oldRelative) && index.Entries.ContainsKey(oldRelative);
+                    LocalFileIndexEntry? existingEntry = null;
+                    bool isKnownRename = !string.IsNullOrWhiteSpace(oldRelative) &&
+                        (index.Entries.TryGetValue(oldRelative, out existingEntry) ||
+                         index.Entries.TryGetValue(oldRelative.Replace('\\', '/'), out existingEntry));
 
-                    if (isKnownRename)
+                    if (!isKnownRename && File.Exists(item.FullPath))
+                    {
+                        string currentSha = await FileStreamingHelper.ComputeFileSha256Async(item.FullPath, cancellationToken);
+                        var candidate = index.Entries.Values.FirstOrDefault(e =>
+                            !File.Exists(Path.Combine(root, e.RelativePath)) &&
+                            string.Equals(e.LastSyncedSha256, currentSha, StringComparison.OrdinalIgnoreCase));
+                        if (candidate != null)
+                        {
+                            oldRelative = candidate.RelativePath.Replace('\\', '/');
+                            existingEntry = candidate;
+                            isKnownRename = true;
+                        }
+                    }
+
+                    if (isKnownRename && existingEntry != null)
                     {
                         Log($"[FileWatcher] Renamed: {oldRelative} -> {item.Key}");
 
@@ -1776,17 +1938,19 @@ public class SyncEngine : ISyncEngine
                         if (renResp.Success)
                         {
                             Log($"[SyncEngine] Rename metadata updated: {oldRelative} -> {item.Key}");
-                            if (index.Entries.TryGetValue(oldRelative, out var entry))
+                            index.Entries.Remove(oldRelative);
+                            index.Entries.Remove(oldRelative.Replace('\\', '/'));
+                            existingEntry.RelativePath = item.Key;
+                            if (renResp.FileId.HasValue)
                             {
-                                index.Entries.Remove(oldRelative);
-                                entry.RelativePath = item.Key;
-                                if (File.Exists(item.FullPath))
-                                {
-                                    entry.LastWriteTimeUtc = new FileInfo(item.FullPath).LastWriteTimeUtc;
-                                }
-                                index.Entries[item.Key] = entry;
-                                await _indexService.SaveIndexAsync(index, cancellationToken);
+                                existingEntry.FileId = renResp.FileId;
                             }
+                            if (File.Exists(item.FullPath))
+                            {
+                                existingEntry.LastWriteTimeUtc = new FileInfo(item.FullPath).LastWriteTimeUtc;
+                            }
+                            index.Entries[item.Key] = existingEntry;
+                            await _indexService.SaveIndexAsync(index, cancellationToken);
                         }
                         else
                         {
@@ -2236,6 +2400,15 @@ public class SyncEngine : ISyncEngine
             if (_activeProfile == null || _activeProfile.AccessMode != BackupSetAccessMode.Shared || !IsRunning)
             {
                 break;
+            }
+
+            // Check if watcher events are pending in debounce queue; if so, skip this pass to avoid racing
+            lock (_pendingEvents)
+            {
+                if (_pendingEvents.Count > 0)
+                {
+                    continue;
+                }
             }
 
             bool acquired = false;

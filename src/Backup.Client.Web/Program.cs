@@ -43,6 +43,7 @@ builder.Services.AddSingleton<IFileStabilityHelper, FileStabilityHelper>();
 builder.Services.AddSingleton<IDirectoryScanner, DirectoryScanner>();
 builder.Services.AddSingleton<IFileSystemWatcherService, FileSystemWatcherService>();
 builder.Services.AddSingleton<IRestoreSuppressionService, RestoreSuppressionService>();
+builder.Services.AddScoped<IClipboardService, ClipboardService>();
 
 builder.Services.AddSingleton<ISyncEngine>(sp =>
 {

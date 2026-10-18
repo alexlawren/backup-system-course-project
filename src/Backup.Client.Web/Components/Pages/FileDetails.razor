@@ -7,6 +7,7 @@
 @inject ISyncProfileService ProfileService
 @inject NavigationManager Navigation
 @inject IJSRuntime JSRuntime
+@inject IClipboardService ClipboardService
 @inject ILogger<FileDetails> Logger
 
 <PageTitle>@(fileMetadata != null ? fileMetadata.RelativePath : "Сведения о файле")</PageTitle>
@@ -90,7 +91,7 @@ else if (fileMetadata != null)
                     <span>@FormatTruncatedHash(fileMetadata.CurrentSha256)</span>
                     @if (!string.IsNullOrEmpty(fileMetadata.CurrentSha256))
                     {
-                        <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; font-size: 0.75rem;" title="Копировать полный SHA-256 (@fileMetadata.CurrentSha256)" @onclick="() => CopySha256Async(fileMetadata.CurrentSha256)">📋</button>
+                        <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; font-size: 0.75rem;" title="Копировать полный SHA-256 (@fileMetadata.CurrentSha256)" @onclick="() => CopySha256Async(fileMetadata.CurrentSha256)">@(_copiedHashes.Contains(fileMetadata.CurrentSha256 ?? "") ? "Скопировано" : "📋")</button>
                     }
                 </span>
             </div>
@@ -200,7 +201,7 @@ else if (fileMetadata != null)
                                 </td>
                                 <td class="mono" title="@ver.Sha256" style="cursor: help; white-space: nowrap;">
                                     <span>@FormatTruncatedHash(ver.Sha256)</span>
-                                    <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; margin-left: 0.35rem; font-size: 0.75rem;" title="Копировать полный SHA-256 (@ver.Sha256)" @onclick="() => CopySha256Async(ver.Sha256)">📋</button>
+                                    <button class="btn btn-secondary btn-sm" style="padding: 1px 6px; margin-left: 0.35rem; font-size: 0.75rem;" title="Копировать полный SHA-256 (@ver.Sha256)" @onclick="() => CopySha256Async(ver.Sha256)">@(_copiedHashes.Contains(ver.Sha256 ?? "") ? "Скопировано" : "📋")</button>
                                 </td>
                                 <td style="font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap;">
                                     @ver.CreatedAtUtc.ToString("dd.MM.yyyy HH:mm:ss")
@@ -426,16 +427,23 @@ else if (fileMetadata != null)
         return $"{hash[..8]}...{hash[^8..]}";
     }
 
+    private readonly HashSet<string> _copiedHashes = new(StringComparer.OrdinalIgnoreCase);
+
     private async Task CopySha256Async(string? sha)
     {
         if (string.IsNullOrWhiteSpace(sha)) return;
-        try
+        string clean = sha.Trim();
+        bool ok = await ClipboardService.CopyTextAsync(clean);
+        if (ok)
         {
-            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", sha);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogWarning("Failed to copy SHA-256 to clipboard: {Message}", ex.Message);
+            _copiedHashes.Add(clean);
+            StateHasChanged();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(1500);
+                _copiedHashes.Remove(clean);
+                await InvokeAsync(StateHasChanged);
+            });
         }
     }
 }
