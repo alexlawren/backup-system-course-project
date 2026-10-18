@@ -123,7 +123,7 @@
         <div class="checklist-item @(activeBackupSetId != Guid.Empty ? "done" : "")">
             <span class="checklist-num">4</span>
             <span class="checklist-name">Набор активирован</span>
-            <span class="checklist-status">@(activeBackupSetId != Guid.Empty ? $"✓ {backupSetName}" : "Не активирован")</span>
+            <span class="checklist-status">@(activeBackupSetId != Guid.Empty ? $"✓ {activeBackupSetName}" : "Не активирован")</span>
         </div>
 
         <div class="checklist-item @(SyncEngine.IsRunning ? "done" : "")">
@@ -188,12 +188,12 @@
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label" for="backupSetName">Название набора:</label>
-                <input id="backupSetName" class="form-input" @bind="backupSetName" placeholder="Например: DefaultSet" disabled="@isLoading" />
+                <input id="backupSetName" class="form-input" @bind="newBackupSetName" placeholder="Например: DefaultSet" disabled="@isLoading" />
                 <span class="form-helper">Имя профиля резервного копирования в базе данных</span>
             </div>
             <div class="form-group">
                 <label class="form-label" for="localRootPath">Папка резервного копирования:</label>
-                <input id="localRootPath" class="form-input" @bind="localRootPath" placeholder="Например: D:\BackupDemo" disabled="@isLoading" />
+                <input id="localRootPath" class="form-input" @bind="newLocalRootPath" placeholder="Например: D:\BackupDemo" disabled="@isLoading" />
                 <span class="form-helper">Локальный каталог для отслеживания и реконсиляции</span>
             </div>
         </div>
@@ -202,11 +202,11 @@
             <label class="form-label">Тип набора:</label>
             <div style="display: flex; gap: 1.25rem; align-items: center; margin-top: 0.35rem;">
                 <label style="cursor: pointer; display: flex; align-items: center; gap: 0.4rem; font-size: 0.95rem;">
-                    <input type="radio" name="accessMode" value="@BackupSetAccessMode.Private" checked="@(selectedAccessMode == BackupSetAccessMode.Private)" @onchange="@(() => selectedAccessMode = BackupSetAccessMode.Private)" disabled="@isLoading" />
+                    <input type="radio" name="accessMode" value="@BackupSetAccessMode.Private" checked="@(newBackupSetAccessMode == BackupSetAccessMode.Private)" @onchange="@(() => newBackupSetAccessMode = BackupSetAccessMode.Private)" disabled="@isLoading" />
                     Личный (Private)
                 </label>
                 <label style="cursor: pointer; display: flex; align-items: center; gap: 0.4rem; font-size: 0.95rem;">
-                    <input type="radio" name="accessMode" value="@BackupSetAccessMode.Shared" checked="@(selectedAccessMode == BackupSetAccessMode.Shared)" @onchange="@(() => selectedAccessMode = BackupSetAccessMode.Shared)" disabled="@isLoading" />
+                    <input type="radio" name="accessMode" value="@BackupSetAccessMode.Shared" checked="@(newBackupSetAccessMode == BackupSetAccessMode.Shared)" @onchange="@(() => newBackupSetAccessMode = BackupSetAccessMode.Shared)" disabled="@isLoading" />
                     Общий (Shared)
                 </label>
             </div>
@@ -214,7 +214,7 @@
         </div>
 
         <div style="display: flex; gap: 0.65rem; align-items: center; flex-wrap: wrap;">
-            <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))">
+            <button class="btn btn-primary" @onclick="CreateAndActivateProfileAsync" disabled="@(isLoading || string.IsNullOrWhiteSpace(newBackupSetName) || string.IsNullOrWhiteSpace(newLocalRootPath))">
                 Сохранить и активировать
             </button>
 
@@ -234,7 +234,7 @@
         <div class="kv-grid" style="margin-top: 0.5rem;">
             <div class="kv-row">
                 <span class="kv-key">Активный набор:</span>
-                <span class="kv-val mono">@(activeBackupSetId != Guid.Empty ? $"{backupSetName} ({activeBackupSetId})" : "—")</span>
+                <span class="kv-val mono">@(activeBackupSetId != Guid.Empty ? $"{activeBackupSetName} ({activeBackupSetId})" : "—")</span>
             </div>
 
             <div class="kv-row">
@@ -253,7 +253,7 @@
 
             <div class="kv-row">
                 <span class="kv-key">Название:</span>
-                <span class="kv-val mono" style="font-weight: 600;">@(activeBackupSetId != Guid.Empty ? backupSetName : "—")</span>
+                <span class="kv-val mono" style="font-weight: 600;">@(activeBackupSetId != Guid.Empty ? activeBackupSetName : "—")</span>
             </div>
 
             @if (activeAccessMode == BackupSetAccessMode.Shared)
@@ -514,18 +514,21 @@
     private string clientStatusMessage = "";
     private bool clientStatusIsError;
 
-    private string backupSetName = "DefaultSet";
-    private string localRootPath = "";
-    private string? activeLocalRootPath;
-    private Guid activeBackupSetId = Guid.Empty;
-    private string backupSetMessage = "";
-    private bool backupSetIsError;
+    // Fields for creating a new backup set
+    private string newBackupSetName = "DefaultSet";
+    private string newLocalRootPath = "";
+    private BackupSetAccessMode newBackupSetAccessMode = BackupSetAccessMode.Private;
 
-    private BackupSetAccessMode selectedAccessMode = BackupSetAccessMode.Private;
+    // Fields representing the currently active backup set state
+    private Guid activeBackupSetId = Guid.Empty;
+    private string activeBackupSetName = "";
+    private string? activeLocalRootPath;
     private BackupSetAccessMode activeAccessMode = BackupSetAccessMode.Private;
     private string? activeShareCode;
     private List<BackupSetMemberDto>? membersList;
     private bool showMembers;
+    private string backupSetMessage = "";
+    private bool backupSetIsError;
 
     private string joinShareCode = "";
     private string joinLocalRootPath = "";
@@ -544,8 +547,7 @@
             if (profile != null)
             {
                 activeBackupSetId = profile.BackupSetId;
-                backupSetName = profile.Name;
-                localRootPath = profile.LocalRootPath;
+                activeBackupSetName = profile.Name;
                 activeLocalRootPath = profile.LocalRootPath;
                 activeAccessMode = profile.AccessMode;
                 activeShareCode = profile.ShareCode;
@@ -554,9 +556,17 @@
                     await LoadMembersAsync();
                 }
             }
-            else
+            else if (SyncEngine.ActiveProfile != null)
             {
-                localRootPath = "";
+                activeBackupSetId = SyncEngine.ActiveProfile.BackupSetId;
+                activeBackupSetName = SyncEngine.ActiveProfile.Name;
+                activeLocalRootPath = SyncEngine.ActiveProfile.LocalRootPath;
+                activeAccessMode = SyncEngine.ActiveProfile.AccessMode;
+                activeShareCode = SyncEngine.ActiveProfile.ShareCode;
+                if (activeAccessMode == BackupSetAccessMode.Shared)
+                {
+                    await LoadMembersAsync();
+                }
             }
 
             await CheckGatewayConnectionAsync();
@@ -577,13 +587,40 @@
         {
             activeBackupSetId = profile.BackupSetId;
             activeLocalRootPath = profile.LocalRootPath;
-            backupSetName = profile.Name;
+            activeBackupSetName = profile.Name;
             activeAccessMode = profile.AccessMode;
             activeShareCode = profile.ShareCode;
-            if (activeAccessMode == BackupSetAccessMode.Shared)
+        }
+        else if (SyncEngine.ActiveProfile != null)
+        {
+            activeBackupSetId = SyncEngine.ActiveProfile.BackupSetId;
+            activeLocalRootPath = SyncEngine.ActiveProfile.LocalRootPath;
+            activeBackupSetName = SyncEngine.ActiveProfile.Name;
+            activeAccessMode = SyncEngine.ActiveProfile.AccessMode;
+            activeShareCode = SyncEngine.ActiveProfile.ShareCode;
+        }
+
+        // Preserve shared status if SyncEngine or activeShareCode indicates it is Shared
+        if (SyncEngine.ActiveProfile != null && SyncEngine.ActiveProfile.BackupSetId == activeBackupSetId)
+        {
+            if (SyncEngine.ActiveProfile.AccessMode == BackupSetAccessMode.Shared)
             {
-                await LoadMembersAsync();
+                activeAccessMode = BackupSetAccessMode.Shared;
             }
+            if (!string.IsNullOrEmpty(SyncEngine.ActiveProfile.ShareCode) && string.IsNullOrEmpty(activeShareCode))
+            {
+                activeShareCode = SyncEngine.ActiveProfile.ShareCode;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(activeShareCode))
+        {
+            activeAccessMode = BackupSetAccessMode.Shared;
+        }
+
+        if (activeAccessMode == BackupSetAccessMode.Shared)
+        {
+            await LoadMembersAsync();
         }
         await LoadTotalFilesCountAsync();
         StateHasChanged();
@@ -660,10 +697,10 @@
 
     private async Task CreateAndActivateProfileAsync()
     {
-        if (string.IsNullOrWhiteSpace(backupSetName) || string.IsNullOrWhiteSpace(localRootPath))
+        if (string.IsNullOrWhiteSpace(newBackupSetName) || string.IsNullOrWhiteSpace(newLocalRootPath))
             return;
 
-        string normalizedRootPath = Path.GetFullPath(localRootPath.Trim());
+        string normalizedRootPath = Path.GetFullPath(newLocalRootPath.Trim());
         if (!Directory.Exists(normalizedRootPath))
         {
             try
@@ -682,12 +719,11 @@
         backupSetMessage = "";
         try
         {
-            var response = await BackupService.CreateBackupSetAsync(backupSetName, normalizedRootPath, selectedAccessMode);
+            var response = await BackupService.CreateBackupSetAsync(newBackupSetName, normalizedRootPath, newBackupSetAccessMode);
             if (response.Success && response.BackupSetId != Guid.Empty)
             {
                 activeBackupSetId = response.BackupSetId;
-                backupSetName = response.Name;
-                localRootPath = normalizedRootPath;
+                activeBackupSetName = response.Name;
                 activeLocalRootPath = normalizedRootPath;
                 activeAccessMode = response.AccessMode;
                 activeShareCode = response.ShareCode;
@@ -695,7 +731,7 @@
                 var profile = new SyncProfile
                 {
                     BackupSetId = response.BackupSetId,
-                    Name = backupSetName,
+                    Name = response.Name,
                     LocalRootPath = normalizedRootPath,
                     AutomaticSyncEnabled = SyncEngine.IsRunning,
                     AccessMode = response.AccessMode,
@@ -798,8 +834,7 @@
                 var setId = joinResp.BackupSetId.Value;
                 var setName = joinResp.Name ?? "SharedSet";
                 activeBackupSetId = setId;
-                backupSetName = setName;
-                localRootPath = normalizedRoot;
+                activeBackupSetName = setName;
                 activeLocalRootPath = normalizedRoot;
                 activeAccessMode = BackupSetAccessMode.Shared;
                 activeShareCode = joinResp.ShareCode ?? joinShareCode.Trim();
@@ -862,12 +897,35 @@
         isLoading = true;
         try
         {
+            var existingProfile = await ProfileService.GetProfileAsync();
+            var effectiveAccessMode = activeAccessMode;
+            if (effectiveAccessMode != BackupSetAccessMode.Shared && existingProfile?.AccessMode == BackupSetAccessMode.Shared)
+            {
+                effectiveAccessMode = BackupSetAccessMode.Shared;
+            }
+            if (effectiveAccessMode != BackupSetAccessMode.Shared && SyncEngine.ActiveProfile?.AccessMode == BackupSetAccessMode.Shared)
+            {
+                effectiveAccessMode = BackupSetAccessMode.Shared;
+            }
+            if (effectiveAccessMode != BackupSetAccessMode.Shared && !string.IsNullOrWhiteSpace(activeShareCode ?? existingProfile?.ShareCode))
+            {
+                effectiveAccessMode = BackupSetAccessMode.Shared;
+            }
+
+            var effectiveShareCode = !string.IsNullOrWhiteSpace(activeShareCode)
+                ? activeShareCode
+                : (existingProfile?.ShareCode ?? SyncEngine.ActiveProfile?.ShareCode);
+
             var profile = new SyncProfile
             {
                 BackupSetId = activeBackupSetId,
-                Name = backupSetName,
+                Name = !string.IsNullOrWhiteSpace(activeBackupSetName)
+                    ? activeBackupSetName
+                    : (!string.IsNullOrWhiteSpace(existingProfile?.Name) ? existingProfile.Name : "BackupSet"),
                 LocalRootPath = activeLocalRootPath,
-                AutomaticSyncEnabled = true
+                AutomaticSyncEnabled = true,
+                AccessMode = effectiveAccessMode,
+                ShareCode = effectiveShareCode
             };
             await ProfileService.SaveProfileAsync(profile);
 
@@ -947,7 +1005,7 @@
         backupOperationResult = null;
         try
         {
-            string root = SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? localRootPath;
+            string root = SyncEngine.CurrentLocalRootPath ?? activeLocalRootPath ?? newLocalRootPath;
             backupOperationResult = await BackupService.BackupSingleFileAsync(activeBackupSetId, root, manualFilePath);
         }
         catch (Exception ex)

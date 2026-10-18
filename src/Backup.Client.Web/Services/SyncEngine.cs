@@ -283,6 +283,10 @@ public class SyncEngine : ISyncEngine
     public async Task StartAsync(SyncProfile profile, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
+        if (!string.IsNullOrWhiteSpace(profile.ShareCode) && profile.AccessMode != BackupSetAccessMode.Shared)
+        {
+            profile.AccessMode = BackupSetAccessMode.Shared;
+        }
         profile.AutomaticSyncEnabled = true;
         await SwitchProfileAsync(profile, cancellationToken);
         if (profile.AccessMode == BackupSetAccessMode.Shared && IsRunning)
@@ -310,6 +314,11 @@ public class SyncEngine : ISyncEngine
         if (!Directory.Exists(normalizedPath))
         {
             Directory.CreateDirectory(normalizedPath);
+        }
+
+        if (!string.IsNullOrWhiteSpace(profile.ShareCode) && profile.AccessMode != BackupSetAccessMode.Shared)
+        {
+            profile.AccessMode = BackupSetAccessMode.Shared;
         }
 
         bool shouldRun = profile.AutomaticSyncEnabled || IsRunning;

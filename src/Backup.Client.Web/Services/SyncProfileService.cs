@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Backup.Client.Web.Services;
 
@@ -23,7 +24,12 @@ public class SyncProfileService : ISyncProfileService
 {
     private readonly string _profileFilePath;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
 
     public SyncProfileService(string? baseDirectory = null)
     {
@@ -73,7 +79,16 @@ public class SyncProfileService : ISyncProfileService
                 return null;
             }
 
-            return JsonSerializer.Deserialize<SyncProfile>(json, JsonOptions);
+            var profile = JsonSerializer.Deserialize<SyncProfile>(json, JsonOptions);
+            if (profile != null)
+            {
+                if (!string.IsNullOrWhiteSpace(profile.ShareCode) && profile.AccessMode != Backup.Shared.Messages.BackupSetAccessMode.Shared)
+                {
+                    profile.AccessMode = Backup.Shared.Messages.BackupSetAccessMode.Shared;
+                }
+            }
+
+            return profile;
         }
         catch
         {
@@ -88,6 +103,11 @@ public class SyncProfileService : ISyncProfileService
     public async Task SaveProfileAsync(SyncProfile profile, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
+
+        if (!string.IsNullOrWhiteSpace(profile.ShareCode) && profile.AccessMode != Backup.Shared.Messages.BackupSetAccessMode.Shared)
+        {
+            profile.AccessMode = Backup.Shared.Messages.BackupSetAccessMode.Shared;
+        }
 
         await _semaphore.WaitAsync(cancellationToken);
         try
