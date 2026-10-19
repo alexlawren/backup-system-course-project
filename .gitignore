@@ -493,3 +493,7 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Temporary office files and root docx
+~$*.docx
+/*.docx
